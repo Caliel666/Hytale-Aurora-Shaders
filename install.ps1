@@ -304,8 +304,9 @@ try {
     $openrrRuntimeSource = Join-Path $root 'build\\OpenNrRrRuntime.dll'
     $openrrDataSource = Join-Path $root 'build\\opennr-rr'
     if (-not (Test-Path -LiteralPath $openrrRuntimeSource -PathType Leaf) -or
-        -not (Test-Path -LiteralPath (Join-Path $openrrDataSource 'shaders') -PathType Container)) {
-        throw 'OpenRR build payload is incomplete; refusing to install a hook without its runtime assets.'
+        -not (Test-Path -LiteralPath (Join-Path $openrrDataSource 'shaders') -PathType Container) -or
+        -not (Test-Path -LiteralPath (Join-Path $openrrDataSource 'nvngx_dlssd.dll') -PathType Leaf)) {
+        throw 'OpenRR build payload is incomplete (runtime, shaders, or pinned DLSSD 310.9.1 weight source missing); refusing to install.'
     }
     Copy-Item -LiteralPath $openrrRuntimeSource -Destination $openrrRuntime -Force
     if (Test-Path -LiteralPath $openrrData) { Remove-Item -LiteralPath $openrrData -Recurse -Force }
