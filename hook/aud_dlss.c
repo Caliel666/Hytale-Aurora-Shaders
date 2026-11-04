@@ -30,6 +30,9 @@
 #include "nvsdk_ngx_defs_vk.h"
 #include "nvsdk_ngx_defs_dlssd.h"
 #include "aud_dlss.h"
+#ifdef _WIN32
+#include "opennr_rr_api.h"
+#endif
 
 static AudLogFn g_log;
 #define LOG(...) do { if (g_log) g_log(__VA_ARGS__); } while (0)
@@ -144,6 +147,18 @@ void aud_set_camera(const float *worldToViewColumnMajor, const float *viewToClip
 static int g_ngxReady;
 static int g_ownsDevice;
 static int g_rrAvailable, g_rr;   // Ray Reconstruction available / the configured feature is RR
+#ifdef _WIN32
+// OpenRR is an independent ABI-5 Vulkan-host backend. It shares the GL images and semaphores
+// below, but does not initialize or call NVIDIA NGX.
+static HMODULE g_openrrDll;
+static PFN_OnrRrGetApi g_openrrGetApi;
+static OnrRrApi5 g_openrrApi;
+static void *g_openrrContext;
+static int g_openrrMode, g_openrrReady;
+static uint32_t g_openrrQueueFamily, g_openrrQueueIndex, g_openrrApiVersion;
+static wchar_t g_openrrDataDir[MAX_PATH], g_openrrDlssdPath[MAX_PATH];
+static unsigned g_openrrInfoFrame;
+#endif
 
 // ----------------------------------------------------------------------------------------
 // GL interop entry points
@@ -756,6 +771,447 @@ int aud_init_shared(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *dllDir,
     if (!context || !context->instance || !context->physicalDevice || !context->device || !context->queue || !context->getInstanceProcAddr || !context->getDeviceProcAddr) return 0;
     return aud_init_context(log, glGetProc, dllDir, dataDir, context);
 }
+
+
+#ifdef _WIN32
+static void openrr_last_error(char *buffer, uint32_t size)
+{
+    if (buffer && size) buffer[0] = 0;
+    if (g_openrrApi.v4.v3.v2.v1.GetLastError)
+        g_openrrApi.v4.v3.v2.v1.GetLastError(buffer, size);
+}
+
+static int openrr_init_gl(AudGetProcFn getProc)
+{
+#define OPENRR_GLP(field, name) gl.field = (void *)getProc(name); if (!gl.field) { LOG("openrr: GL entry point %s missing", name); return 0; }
+    OPENRR_GLP(CreateMemoryObjects, "glCreateMemoryObjectsEXT")
+    OPENRR_GLP(DeleteMemoryObjects, "glDeleteMemoryObjectsEXT")
+    OPENRR_GLP(MemoryObjectParameteriv, "glMemoryObjectParameterivEXT")
+    OPENRR_GLP(ImportMemoryHandle, "glImportMemoryWin32HandleEXT")
+    OPENRR_GLP(TexStorageMem2D, "glTexStorageMem2DEXT")
+    OPENRR_GLP(GenSemaphores, "glGenSemaphoresEXT")
+    OPENRR_GLP(DeleteSemaphores, "glDeleteSemaphoresEXT")
+    OPENRR_GLP(ImportSemaphoreHandle, "glImportSemaphoreWin32HandleEXT")
+    OPENRR_GLP(SignalSemaphore, "glSignalSemaphoreEXT")
+    OPENRR_GLP(WaitSemaphore, "glWaitSemaphoreEXT")
+    OPENRR_GLP(GetUnsignedBytei_v, "glGetUnsignedBytei_vEXT")
+    OPENRR_GLP(GenTextures, "glGenTextures")
+    OPENRR_GLP(DeleteTextures, "glDeleteTextures")
+    OPENRR_GLP(BindTexture, "glBindTexture")
+    OPENRR_GLP(TexParameteri, "glTexParameteri")
+    OPENRR_GLP(GetIntegerv, "glGetIntegerv")
+    OPENRR_GLP(GetTexLevelParameteriv, "glGetTexLevelParameteriv")
+    OPENRR_GLP(GetError, "glGetError")
+    OPENRR_GLP(Flush, "glFlush")
+    OPENRR_GLP(Finish, "glFinish")
+#undef OPENRR_GLP
+    return 1;
+}
+
+static int openrr_has_extension(const VkExtensionProperties *extensions, uint32_t count, const char *name)
+{
+    for (uint32_t i = 0; i < count; ++i)
+        if (!strcmp(extensions[i].extensionName, name)) return 1;
+    return 0;
+}
+
+static int openrr_prepare_device(void)
+{
+    uint32_t count = 0;
+    if (!vk_ok(vkEnumeratePhysicalDevices_(g_inst, &count, NULL), "enumerate OpenRR Vulkan adapters") || !count) {
+        LOG("openrr: no Vulkan adapters");
+        return 0;
+    }
+    VkPhysicalDevice *devices = (VkPhysicalDevice *)calloc(count, sizeof(*devices));
+    if (!devices) return 0;
+    if (!vk_ok(vkEnumeratePhysicalDevices_(g_inst, &count, devices), "read OpenRR Vulkan adapters")) {
+        free(devices); return 0;
+    }
+
+    unsigned char glUuid[VK_UUID_SIZE] = {0};
+    gl.GetUnsignedBytei_v(GL_DEVICE_UUID_EXT, 0, glUuid);
+    VkPhysicalDeviceProperties2 selectedProps = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    for (uint32_t i = 0; i < count && !g_phys; ++i) {
+        VkPhysicalDeviceIDProperties id = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};
+        VkPhysicalDeviceProperties2 props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &id};
+        vkGetPhysicalDeviceProperties2_(devices[i], &props);
+        if (props.properties.vendorID == 0x1002 && !memcmp(id.deviceUUID, glUuid, VK_UUID_SIZE)) {
+            g_phys = devices[i];
+            selectedProps = props;
+            LOG("openrr: Vulkan adapter %s (AMD, same device UUID as OpenGL)", props.properties.deviceName);
+        }
+    }
+    if (!g_phys) {
+        VkPhysicalDevice fallback = VK_NULL_HANDLE;
+        VkPhysicalDeviceProperties2 fallbackProps = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        unsigned amdCount = 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            VkPhysicalDeviceProperties2 props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+            vkGetPhysicalDeviceProperties2_(devices[i], &props);
+            if (props.properties.vendorID == 0x1002) {
+                fallback = devices[i];
+                fallbackProps = props;
+                ++amdCount;
+            }
+        }
+        if (amdCount == 1) {
+            g_phys = fallback;
+            selectedProps = fallbackProps;
+            LOG("openrr: using the only AMD Vulkan adapter (%s); GL device UUID was unavailable", selectedProps.properties.deviceName);
+        }
+    }
+    free(devices);
+    if (!g_phys) {
+        LOG("openrr: no AMD Vulkan adapter matching the OpenGL device (or more than one unmatched AMD adapter)");
+        return 0;
+    }
+    g_openrrApiVersion = selectedProps.properties.apiVersion;
+    if (g_openrrApiVersion < VK_API_VERSION_1_3) {
+        LOG("openrr: Vulkan 1.3 is required (adapter reports %u.%u.%u)",
+            VK_VERSION_MAJOR(g_openrrApiVersion), VK_VERSION_MINOR(g_openrrApiVersion), VK_VERSION_PATCH(g_openrrApiVersion));
+        return 0;
+    }
+    vkGetPhysicalDeviceMemoryProperties_(g_phys, &g_memProps);
+
+    uint32_t familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties_(g_phys, &familyCount, NULL);
+    VkQueueFamilyProperties *families = (VkQueueFamilyProperties *)calloc(familyCount, sizeof(*families));
+    if (!families) return 0;
+    vkGetPhysicalDeviceQueueFamilyProperties_(g_phys, &familyCount, families);
+    g_qfam = UINT32_MAX;
+    for (uint32_t i = 0; i < familyCount; ++i) {
+        if ((families[i].queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) ==
+            (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT) && families[i].queueCount) {
+            g_qfam = i;
+            break;
+        }
+    }
+    free(families);
+    if (g_qfam == UINT32_MAX) {
+        LOG("openrr: AMD adapter has no graphics+compute queue for the GL interop bridge");
+        return 0;
+    }
+
+    uint32_t extensionCount = 0;
+    if (!vk_ok(vkEnumerateDeviceExtensionProperties_(g_phys, NULL, &extensionCount, NULL), "enumerate OpenRR device extensions"))
+        return 0;
+    VkExtensionProperties *extensions = (VkExtensionProperties *)calloc(extensionCount, sizeof(*extensions));
+    if (!extensions) return 0;
+    if (!vk_ok(vkEnumerateDeviceExtensionProperties_(g_phys, NULL, &extensionCount, extensions), "read OpenRR device extensions")) {
+        free(extensions); return 0;
+    }
+    const char *required[] = {
+        VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
+        VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME
+    };
+    for (unsigned i = 0; i < sizeof(required) / sizeof(required[0]); ++i) {
+        if (!openrr_has_extension(extensions, extensionCount, required[i])) {
+            LOG("openrr: AMD adapter lacks required GL/Vulkan interop extension %s", required[i]);
+            free(extensions); return 0;
+        }
+    }
+    free(extensions);
+
+    // Supply our GL-facing queue. PrepareVkDevice appends and reserves a separate compute
+    // queue for OpenRR, enabling all RDNA4 features/extensions needed by its kernels.
+    float priority = 1.0f;
+    VkDeviceQueueCreateInfo queue = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    queue.queueFamilyIndex = g_qfam;
+    queue.queueCount = 1;
+    queue.pQueuePriorities = &priority;
+    VkPhysicalDeviceVulkan13Features v13 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES};
+    VkPhysicalDeviceVulkan12Features v12 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, &v13};
+    VkPhysicalDeviceVulkan11Features v11 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, &v12};
+    VkPhysicalDeviceFeatures2 features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &v11};
+    VkDeviceCreateInfo requested = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &features};
+    requested.queueCreateInfoCount = 1;
+    requested.pQueueCreateInfos = &queue;
+    requested.enabledExtensionCount = (uint32_t)(sizeof(required) / sizeof(required[0]));
+    requested.ppEnabledExtensionNames = required;
+
+    VkDeviceCreateInfo prepared = requested;
+    void *setup = NULL;
+    int32_t status = g_openrrApi.PrepareVkDevice((void *)g_phys, &requested, &prepared, &setup);
+    if (status != ONR_RR_OK) {
+        char error[512] = {0};
+        openrr_last_error(error, sizeof(error));
+        LOG("openrr: PrepareVkDevice rejected this AMD GPU: %s", error[0] ? error : "unsupported Vulkan features or extensions");
+        return 0;
+    }
+    VkResult vr = vkCreateDevice_(g_phys, &prepared, NULL, &g_dev);
+    uint32_t rrFamily = UINT32_MAX, rrIndex = UINT32_MAX;
+    int32_t finish = g_openrrApi.FinishVkDevice(setup, vr == VK_SUCCESS ? (void *)g_dev : NULL, &rrFamily, &rrIndex);
+    if (vr != VK_SUCCESS) {
+        LOG("openrr: vkCreateDevice failed %d", (int)vr);
+        return 0;
+    }
+    if (finish != ONR_RR_OK || (rrFamily == g_qfam && rrIndex == 0)) {
+        LOG("openrr: FinishVkDevice failed or returned the GL queue as its private compute queue");
+        return 0;
+    }
+    g_openrrQueueFamily = rrFamily;
+    g_openrrQueueIndex = rrIndex;
+    g_ownsDevice = 1;
+
+    vkGetDeviceProcAddr_ = (PFN_vkGetDeviceProcAddr)vkGetInstanceProcAddr_(g_inst, "vkGetDeviceProcAddr");
+    if (!vkGetDeviceProcAddr_) return 0;
+#define OPENRR_LOAD_D(n) { PFN_vkVoidFunction fn = vkGetDeviceProcAddr_(g_dev, #n); if (fn) n##_ = (PFN_##n)fn; }
+    VK_FUNCS(OPENRR_LOAD_D)
+#undef OPENRR_LOAD_D
+#define OPENRR_CHECK_VK(n) if (!n##_) { LOG("openrr: Vulkan entry point %s is missing", #n); return 0; }
+    OPENRR_CHECK_VK(vkGetDeviceQueue)
+    OPENRR_CHECK_VK(vkCreateCommandPool)
+    OPENRR_CHECK_VK(vkDestroyCommandPool)
+    OPENRR_CHECK_VK(vkAllocateCommandBuffers)
+    OPENRR_CHECK_VK(vkBeginCommandBuffer)
+    OPENRR_CHECK_VK(vkEndCommandBuffer)
+    OPENRR_CHECK_VK(vkResetCommandBuffer)
+    OPENRR_CHECK_VK(vkQueueSubmit)
+    OPENRR_CHECK_VK(vkWaitForFences)
+    OPENRR_CHECK_VK(vkResetFences)
+    OPENRR_CHECK_VK(vkCreateFence)
+    OPENRR_CHECK_VK(vkDestroyFence)
+    OPENRR_CHECK_VK(vkCreateSemaphore)
+    OPENRR_CHECK_VK(vkDestroySemaphore)
+    OPENRR_CHECK_VK(vkCmdPipelineBarrier)
+    OPENRR_CHECK_VK(vkCreateImage)
+    OPENRR_CHECK_VK(vkCreateImageView)
+    OPENRR_CHECK_VK(vkGetImageMemoryRequirements)
+    OPENRR_CHECK_VK(vkAllocateMemory)
+    OPENRR_CHECK_VK(vkBindImageMemory)
+    OPENRR_CHECK_VK(vkGetMemoryWin32HandleKHR)
+    OPENRR_CHECK_VK(vkGetSemaphoreWin32HandleKHR)
+#undef OPENRR_CHECK_VK
+
+    vkGetDeviceQueue_(g_dev, g_qfam, 0, &g_queue);
+    VkCommandPoolCreateInfo poolInfo = {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = g_qfam;
+    if (!vk_ok(vkCreateCommandPool_(g_dev, &poolInfo, NULL, &g_pool), "create OpenRR host command pool"))
+        return 0;
+    VkCommandBufferAllocateInfo allocate = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocate.commandPool = g_pool;
+    allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocate.commandBufferCount = AUD_FRAMES;
+    if (!vk_ok(vkAllocateCommandBuffers_(g_dev, &allocate, g_cmd), "allocate OpenRR host command buffers"))
+        return 0;
+    for (int i = 0; i < AUD_FRAMES; ++i) {
+        VkFenceCreateInfo fenceInfo = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        if (!vk_ok(vkCreateFence_(g_dev, &fenceInfo, NULL, &g_fence[i]), "create OpenRR host fence"))
+            return 0;
+    }
+    if (!create_semaphore(&g_semGLDone, &g_glSemGLDone) || !create_semaphore(&g_semVKDone, &g_glSemVKDone)) {
+        LOG("openrr: failed to create the shared GL/Vulkan semaphores");
+        return 0;
+    }
+    return 1;
+}
+
+int aud_openrr_init(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *runtimeDir,
+                    const wchar_t *dataDir, const wchar_t *dlssdPath)
+{
+    g_log = log;
+    g_openrrMode = 1;
+    if (!runtimeDir || !dataDir || !dlssdPath || !openrr_init_gl(glGetProc)) return 0;
+    if (wcslen(dataDir) >= MAX_PATH || wcslen(dlssdPath) >= MAX_PATH) {
+        LOG("openrr: asset path exceeds MAX_PATH");
+        return 0;
+    }
+    wcscpy(g_openrrDataDir, dataDir);
+    wcscpy(g_openrrDlssdPath, dlssdPath);
+    if (GetFileAttributesW(g_openrrDlssdPath) == INVALID_FILE_ATTRIBUTES) {
+        LOG("openrr: nvngx_dlssd.dll 310.9.1 is missing at %ls", g_openrrDlssdPath);
+        return 0;
+    }
+    if (!g_openrrDll) {
+        wchar_t runtimePath[MAX_PATH];
+        int length = _snwprintf(runtimePath, MAX_PATH, L"%ls\\\\OpenNrRrRuntime.dll", runtimeDir);
+        if (length <= 0 || length >= MAX_PATH) {
+            LOG("openrr: runtime path is invalid");
+            return 0;
+        }
+        g_openrrDll = LoadLibraryW(runtimePath);
+    }
+    if (!g_openrrDll) {
+        LOG("openrr: failed to load OpenNrRrRuntime.dll (Windows error %lu)", (unsigned long)GetLastError());
+        return 0;
+    }
+    if (!g_openrrGetApi) g_openrrGetApi = (PFN_OnrRrGetApi)GetProcAddress(g_openrrDll, "OnrRrGetApi");
+    if (!g_openrrGetApi || g_openrrGetApi(5, &g_openrrApi.v4.v3.v2.v1) != ONR_RR_OK) {
+        LOG("openrr: OpenNrRrRuntime.dll does not provide ABI 5");
+        return 0;
+    }
+
+    if (!g_vulkan) g_vulkan = LoadLibraryW(L"vulkan-1.dll");
+    if (!g_vulkan) {
+        LOG("openrr: Vulkan loader vulkan-1.dll was not found");
+        return 0;
+    }
+    vkGetInstanceProcAddr_ = (PFN_vkGetInstanceProcAddr)GetProcAddress(g_vulkan, "vkGetInstanceProcAddr");
+    if (!vkGetInstanceProcAddr_) return 0;
+    vkCreateInstance_ = (PFN_vkCreateInstance)vkGetInstanceProcAddr_(NULL, "vkCreateInstance");
+    if (!vkCreateInstance_) return 0;
+    VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
+    app.pApplicationName = "Aurora Shaders OpenRR";
+    app.apiVersion = VK_API_VERSION_1_3;
+    VkInstanceCreateInfo instanceInfo = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+    instanceInfo.pApplicationInfo = &app;
+    VkResult vr = vkCreateInstance_(&instanceInfo, NULL, &g_inst);
+    if (vr != VK_SUCCESS) {
+        LOG("openrr: vkCreateInstance failed %d", (int)vr);
+        return 0;
+    }
+#define OPENRR_LOAD_I(n) n##_ = (PFN_##n)vkGetInstanceProcAddr_(g_inst, #n);
+    VK_FUNCS(OPENRR_LOAD_I)
+#undef OPENRR_LOAD_I
+    if (!vkGetPhysicalDeviceProperties2_ || !vkGetPhysicalDeviceQueueFamilyProperties_ ||
+        !vkEnumeratePhysicalDevices_ || !vkGetPhysicalDeviceMemoryProperties_ ||
+        !vkEnumerateDeviceExtensionProperties_ || !vkCreateDevice_) {
+        LOG("openrr: required Vulkan instance entry points are missing");
+        return 0;
+    }
+    if (!openrr_prepare_device()) return 0;
+    g_openrrReady = 1;
+    g_rrAvailable = 1;
+    LOG("openrr: ABI 5 initialized on AMD Vulkan device; reserved compute queue %u:%u",
+        g_openrrQueueFamily, g_openrrQueueIndex);
+    return 1;
+}
+
+int aud_openrr_available(void)
+{
+    return g_openrrMode && g_openrrReady;
+}
+
+static int openrr_create_context(int renderW, int renderH, int outW, int outH)
+{
+    OnrRrVkDevice device;
+    memset(&device, 0, sizeof(device));
+    device.size = sizeof(device);
+    device.api_version = g_openrrApiVersion;
+    device.instance = (void *)g_inst;
+    device.physical_device = (void *)g_phys;
+    device.device = (void *)g_dev;
+    device.queue_family = g_openrrQueueFamily;
+    device.queue_index = g_openrrQueueIndex;
+
+    OnrRrCreateInfo info;
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    info.mode = ONR_RR_MODE_FAST;
+    info.max_render_width = (uint32_t)renderW;
+    info.max_render_height = (uint32_t)renderH;
+    info.output_width = (uint32_t)outW;
+    info.output_height = (uint32_t)outH;
+    info.dlssd_path = g_openrrDlssdPath;
+    info.data_dir = g_openrrDataDir;
+    info.vk_device = &device;
+    int32_t status = g_openrrApi.v4.v3.v2.v1.Create(&info, &g_openrrContext);
+    if (status != ONR_RR_OK || !g_openrrContext) {
+        char error[512] = {0};
+        openrr_last_error(error, sizeof(error));
+        LOG("openrr: runtime Create failed: %s", error[0] ? error : "unknown runtime error");
+        g_openrrContext = NULL;
+        return 0;
+    }
+    LOG("openrr: runtime context created for %dx%d -> %dx%d; building weights from the pinned 310.9.1 DLL",
+        renderW, renderH, outW, outH);
+    return 1;
+}
+
+static void openrr_set_frame_texture(OnrRrTexture *texture, OnrRrVkImage *view, int which)
+{
+    AudImage *image = &g_img[which];
+    memset(texture, 0, sizeof(*texture));
+    memset(view, 0, sizeof(*view));
+    if (!image->image) return;
+    view->image = (uint64_t)(uintptr_t)image->image;
+    view->view = (uint64_t)(uintptr_t)image->view;
+    view->format = (uint32_t)image->format;
+    view->width = image->w;
+    view->height = image->h;
+    view->mip = 0;
+    view->layer = 0;
+    view->usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                  VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    texture->resource = view;
+    texture->state = VK_IMAGE_LAYOUT_GENERAL;
+}
+
+static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, float mvScaleY, int reset)
+{
+    if (!g_openrrContext || g_bridgeFailed) return 0;
+    VkCommandBuffer cb = begin_cmd();
+    if (!cb) return 0;
+    GLuint textures[AUD_TEX_COUNT];
+    GLenum layouts[AUD_TEX_COUNT];
+    GLuint textureCount = 0;
+    for (int i = 0; i < AUD_TEX_COUNT; ++i) {
+        if (g_img[i].glTex) {
+            textures[textureCount] = g_img[i].glTex;
+            layouts[textureCount++] = GL_LAYOUT_GENERAL_EXT;
+        }
+    }
+    gl.SignalSemaphore(g_glSemGLDone, 0, NULL, textureCount, textures, layouts);
+    gl.Flush();
+    barrier_all(cb, 1);
+
+    OnrRrFrame frame;
+    OnrRrVkImage images[AUD_TEX_COUNT];
+    memset(&frame, 0, sizeof(frame));
+    memset(images, 0, sizeof(images));
+    frame.size = sizeof(frame);
+    frame.flags = (reset ? ONR_RR_FRAME_RESET : 0) | ONR_RR_FRAME_ROUGHNESS_PACKED;
+    frame.render_width = (uint32_t)g_renderW;
+    frame.render_height = (uint32_t)g_renderH;
+    frame.jitter_x = jitterX;
+    frame.jitter_y = jitterY;
+    frame.mv_scale_x = mvScaleX;
+    frame.mv_scale_y = mvScaleY;
+    memcpy(frame.world_to_view, g_worldToView, sizeof(frame.world_to_view));
+    memcpy(frame.view_to_clip, g_viewToClip, sizeof(frame.view_to_clip));
+    openrr_set_frame_texture(&frame.color, &images[AUD_TEX_COLOR], AUD_TEX_COLOR);
+    openrr_set_frame_texture(&frame.diffuse_albedo, &images[AUD_TEX_ALBEDO], AUD_TEX_ALBEDO);
+    openrr_set_frame_texture(&frame.specular_albedo, &images[AUD_TEX_SPECULAR], AUD_TEX_SPECULAR);
+    openrr_set_frame_texture(&frame.normals, &images[AUD_TEX_NORMALS], AUD_TEX_NORMALS);
+    openrr_set_frame_texture(&frame.depth, &images[AUD_TEX_DEPTH], AUD_TEX_DEPTH);
+    openrr_set_frame_texture(&frame.motion, &images[AUD_TEX_MOTION], AUD_TEX_MOTION);
+    openrr_set_frame_texture(&frame.output, &images[AUD_TEX_OUTPUT], AUD_TEX_OUTPUT);
+
+    int32_t status = g_openrrApi.RecordVk(g_openrrContext, &frame, cb);
+    barrier_all(cb, 0);
+    if (!vk_ok(vkEndCommandBuffer_(cb), "end OpenRR frame commands")) return 0;
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.waitSemaphoreCount = 1;
+    submit.pWaitSemaphores = &g_semGLDone;
+    submit.pWaitDstStageMask = &waitStage;
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cb;
+    submit.signalSemaphoreCount = 1;
+    submit.pSignalSemaphores = &g_semVKDone;
+    if (!vk_ok(vkQueueSubmit_(g_queue, 1, &submit, g_fence[g_frameIdx]), "submit OpenRR frame"))
+        return 0;
+    g_frameIdx = (g_frameIdx + 1) % AUD_FRAMES;
+    gl.WaitSemaphore(g_glSemVKDone, 0, NULL, textureCount, textures, layouts);
+    if (!gl_ok("OpenRR GL/Vulkan hand-off")) return 0;
+    if (status != ONR_RR_OK) {
+        char error[512] = {0};
+        openrr_last_error(error, sizeof(error));
+        LOG("openrr: RecordVk failed: %s", error[0] ? error : "unknown runtime error");
+        return 0;
+    }
+    if ((++g_openrrInfoFrame % 300) == 1 && g_openrrApi.v4.v3.v2.v1.GetInfo) {
+        OnrRrInfo info;
+        memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        if (g_openrrApi.v4.v3.v2.v1.GetInfo(g_openrrContext, &info) == ONR_RR_OK)
+            LOG("openrr: state=%u frames=%u GPU %.2f ms; %s", info.state, info.frames, info.gpu_ms_last, info.message);
+    }
+    return 1;
+}
+#endif
 
 // ----------------------------------------------------------------------------------------
 // Feature + images
