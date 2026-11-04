@@ -2912,11 +2912,14 @@ static void settings_load(void)
     int voxelGI = settings_num(txt, "AU_PATH_TRACING", 0) > 0.5 && settings_num(txt, "AU_PRESET", 2) >= 2;
     int modeDenoising = settings_num(txt, voxelGI ? "AU_PT_DENOISE" : "AU_SSGI_DENOISE", 1) > 0.5;
     int denoiser = (int)settings_num(txt, "AU_GI_DENOISER", 1);
-    g_setDlssMode = modeDenoising && (denoiser == 2 || denoiser == 3) ? denoiser : 1;
-#ifdef _WIN32
+    g_setDlssMode = 1;
+#if AU_HAS_DLSS
+    if (modeDenoising && denoiser == 2) g_setDlssMode = 2;
+#endif
+#if defined(_WIN32) && AU_HAS_OPENRR
+    if (modeDenoising && denoiser == 3) g_setDlssMode = 3;
     g_setOpenRR = g_setDlssMode == 3;
 #else
-    if (g_setDlssMode == 3) g_setDlssMode = 1;
     g_setOpenRR = 0;
 #endif
     g_setDlssPreset = settings_num(txt, "AU_DLSS_PRESET", 0);
