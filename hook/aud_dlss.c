@@ -1203,7 +1203,7 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
     memset(&frame, 0, sizeof(frame));
     memset(images, 0, sizeof(images));
     frame.size = sizeof(frame);
-    frame.flags = (reset ? ONR_RR_FRAME_RESET : 0) | ONR_RR_FRAME_ROUGHNESS_PACKED;
+    frame.flags = (reset ? ONR_RR_FRAME_RESET : 0) | ONR_RR_FRAME_MV_JITTERED | ONR_RR_FRAME_ROUGHNESS_PACKED;
     frame.render_width = (uint32_t)g_renderW;
     frame.render_height = (uint32_t)g_renderH;
     frame.jitter_x = jitterX;
