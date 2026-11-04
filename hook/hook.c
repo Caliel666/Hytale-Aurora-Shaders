@@ -2091,7 +2091,10 @@ static int dlss_ready(void)
 #ifndef _WIN32
         if (g_dlssState < 0) InterlockedExchange(&g_reloadRequested, 1);
 #endif
-        logf_("dlss: %s", g_dlssState == 1 ? "ready" : "unavailable, the game upscales as usual");
+        logf_("dlss: %s", g_dlssState == 1 ? "ready (NVIDIA NGX backend)" : "unavailable, the game upscales as usual");
+        // OpenRR 0.1.0 is currently staged by the build, but this OpenGL hook has not
+        // connected its API. Be explicit so an RR request is never mistaken for OpenRR use.
+        logf_("openrr: runtime assets may be installed, but OpenRR is NOT initialized or executing; current RR path is NVIDIA NGX only");
     }
     return g_dlssState == 1;
 }
