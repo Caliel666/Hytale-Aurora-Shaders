@@ -38,21 +38,35 @@ if (-not (Test-Path $stubs)) { & python -I (Join-Path $root 'tools\gen_stubs.py'
 
 Push-Location (Join-Path $root 'hook')
 try {
-    # DLSS (aud_dlss.c) needs the NVIDIA DLSS SDK headers and the Vulkan headers in third_party\;
-    # without them the DLL is built without DLSS.
-    $dlss = @()
-    if ((Test-Path (Join-Path $root 'third_party\DLSS\include\nvsdk_ngx_defs.h')) -and
-        (Test-Path (Join-Path $root 'third_party\vulkan\include\vulkan\vulkan.h'))) {
-        $dlss = @('-DAU_HAS_DLSS=1', '-I..\third_party\DLSS\include', '-I..\third_party\vulkan\include', 'aud_dlss.c', '-ladvapi32')
-        if (Test-Path (Join-Path $root 'third_party\Streamline\include\sl_dlss_g.h')) {
-            & $zig c++ -target x86_64-windows-gnu -std=c++17 -O2 -fno-exceptions -fno-rtti `
-                -I..\third_party\Streamline\include -I..\third_party\vulkan\include `
-                -c aud_framegen.cpp -o ..\build\aud_framegen.o
-            if ($LASTEXITCODE -ne 0) { throw "Frame Generation backend compilation failed ($LASTEXITCODE)" }
-            $dlss += @('-DAU_HAS_FRAMEGEN=1', '..\build\aud_framegen.o', '-lwintrust', '-lcrypt32')
+    $vulkanHeader = Join-Path $root 'third_party\vulkan\include\vulkan\vulkan.h'
+    $dlssHeader = Join-Path $root 'third_party\DLSS\include\nvsdk_ngx_defs.h'
+    $backendArgs = @()
+
+    if (Test-Path -LiteralPath $vulkanHeader) {
+        # OpenRR ABI 5 is independent of the proprietary NVIDIA SDK.
+        $backendArgs += @('-DAU_HAS_OPENRR=1', '-I..\third_party\vulkan\include')
+
+        if (Test-Path -LiteralPath $dlssHeader) {
+            # Preserve NVIDIA DLSS where its optional SDK is present, and add OpenRR alongside it.
+            $backendArgs += @('-DAU_HAS_DLSS=1', '-I..\third_party\DLSS\include', 'aud_dlss.c', '-ladvapi32')
+            if (Test-Path (Join-Path $root 'third_party\Streamline\include\sl_dlss_g.h')) {
+                & $zig c++ -target x86_64-windows-gnu -std=c++17 -O2 -fno-exceptions -fno-rtti -I..\third_party\Streamline\include -I..\third_party\vulkan\include -c aud_framegen.cpp -o ..\build\aud_framegen.o
+                if ($LASTEXITCODE -ne 0) { throw "Frame Generation backend compilation failed ($LASTEXITCODE)" }
+                $backendArgs += @('-DAU_HAS_FRAMEGEN=1', '..\build\aud_framegen.o', '-lwintrust', '-lcrypt32')
+            }
+        } else {
+            # Compile the shared GL/Vulkan bridge with only OpenRR; no NGX headers or symbols.
+            $backendArgs += @('-DAU_HAS_DLSS=0', '-DAU_OPENRR_ONLY=1', 'aud_dlss.c', '-ladvapi32')
+            Write-Host 'Building the AMD OpenRR backend without the proprietary NVIDIA DLSS SDK.'
         }
+    } elseif (Test-Path -LiteralPath $dlssHeader) {
+        throw 'The NVIDIA DLSS SDK is present but Vulkan-Headers are missing from third_party\vulkan\include.'
+    } else {
+        $backendArgs += @('-DAU_HAS_DLSS=0', '-DAU_HAS_OPENRR=0')
+        Write-Warning 'Vulkan-Headers are missing; the OpenRR and DLSS backends will not be compiled.'
     }
-    & $zig cc -target x86_64-windows-gnu -O2 -shared -o ..\build\opengl32.dll hook.c gl_stubs.c @dlss -lgdi32 -luser32
+
+    & $zig cc -target x86_64-windows-gnu -O2 -shared -o ..\build\opengl32.dll hook.c gl_stubs.c @backendArgs -lgdi32 -luser32
     if ($LASTEXITCODE -ne 0) { throw "zig cc failed ($LASTEXITCODE)" }
 } finally { Pop-Location }
 # OpenRR is shipped as its upstream runtime DLL plus the matching SPIR-V kernels.
