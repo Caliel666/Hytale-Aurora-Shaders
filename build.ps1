@@ -93,4 +93,25 @@ foreach ($shader in $shaderFiles) {
     New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
     Copy-Item $shader.FullName $destination -Force
 }
+# OpenRR builds its model locally from NVIDIA's signed DLSSD 310.9.1 weight container.
+# The DLL is read as a data source only; it is not loaded or executed by the AMD backend.
+$dlssdVersion = '310.9.1'
+$dlssdSha256 = '4bc7ea5fcb2f32cf86bc2cb072e8d2860914a0be511cbdcb2fc206c1d9d83b80'
+$dlssdUrl = 'https://huggingface.co/datasets/zmodelerlover/amd-nr/resolve/main/openrr-dlssd/310.9.1/nvngx_dlssd.dll'
+$dlssdCache = Join-Path $openrrDir "nvngx_dlssd-$dlssdVersion.dll"
+if (Test-Path -LiteralPath $dlssdCache) {
+    $cachedHash = (Get-FileHash -LiteralPath $dlssdCache -Algorithm SHA256).Hash.ToLower()
+    if ($cachedHash -ne $dlssdSha256) { Remove-Item -LiteralPath $dlssdCache -Force }
+}
+if (-not (Test-Path -LiteralPath $dlssdCache)) {
+    Write-Host "Downloading OpenRR's pinned DLSSD $dlssdVersion weight source..."
+    Invoke-WebRequest $dlssdUrl -OutFile $dlssdCache -UseBasicParsing
+}
+$actualDlssdHash = (Get-FileHash -LiteralPath $dlssdCache -Algorithm SHA256).Hash.ToLower()
+if ($actualDlssdHash -ne $dlssdSha256) {
+    throw "DLSSD $dlssdVersion weight-source checksum mismatch (got $actualDlssdHash)."
+}
+$stagedOpenRrData = Split-Path $stagedShaders -Parent
+New-Item -ItemType Directory -Force $stagedOpenRrData | Out-Null
+Copy-Item -LiteralPath $dlssdCache -Destination (Join-Path $stagedOpenRrData 'nvngx_dlssd.dll') -Force
 Write-Host "Built $(Join-Path $root 'build\opengl32.dll') with OpenRR $openrrVersion runtime assets."
