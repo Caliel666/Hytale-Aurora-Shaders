@@ -22,9 +22,12 @@
 #ifndef AU_HAS_DLSS
 #define AU_HAS_DLSS 0
 #endif
+#ifndef AU_HAS_OPENRR
+#define AU_HAS_OPENRR 0
+#endif
 static int g_dlssState; // 0 not tried, 1 ready, -1 unavailable
 static int g_setOpenRR;
-#if AU_HAS_DLSS
+#if AU_HAS_DLSS || AU_HAS_OPENRR
 void aud_set_camera(const float *worldToViewColumnMajor, const float *viewToClipColumnMajor);
 #endif
 
@@ -338,7 +341,7 @@ static void expand(Str *out, const char *text, int depth)
                     str_cstr(out, name);
                     str_cstr(out, "\n");
                     expand(out, body, depth + 1);
-#if !AU_HAS_DLSS
+#if !AU_HAS_DLSS && !AU_HAS_OPENRR
                     if (!strcmp(name, "AU_Settings.glsl"))
                         str_cstr(out, "\n#undef AU_DLSS\n#define AU_DLSS 0\n#undef AU_DLSS_RR\n#define AU_DLSS_RR 0\n");
 #elif !defined(_WIN32)
@@ -462,7 +465,7 @@ typedef struct {
     void *data;
 } UniformRec;
 
-#if AU_HAS_DLSS
+#if AU_HAS_DLSS || AU_HAS_OPENRR
 static float g_openrrViewMatrix[16], g_openrrProjectionMatrix[16];
 static int g_openrrHaveViewMatrix, g_openrrHaveProjectionMatrix;
 static void capture_openrr_matrix(UniformRec *uniform, GLsizei count, GLboolean transpose, const GLfloat *values)
@@ -871,7 +874,7 @@ static void APIENTRY hook_glUniform1uiv(GLint loc, GLsizei n, const GLuint *v) {
 static void APIENTRY hook_glUniformMatrix2fv(GLint loc, GLsizei n, GLboolean t, const GLfloat *v) { UPRE cache_uniform(u, U_M2, n, t, v, n * 4 * sizeof(GLfloat)); UPOST r_glUniformMatrix2fv(real, n, t, v); }
 static void APIENTRY hook_glUniformMatrix3fv(GLint loc, GLsizei n, GLboolean t, const GLfloat *v) { UPRE cache_uniform(u, U_M3, n, t, v, n * 9 * sizeof(GLfloat)); UPOST r_glUniformMatrix3fv(real, n, t, v); }
 static void APIENTRY hook_glUniformMatrix4fv(GLint loc, GLsizei n, GLboolean t, const GLfloat *v) { UPRE cache_uniform(u, U_M4, n, t, v, n * 16 * sizeof(GLfloat));
-#if AU_HAS_DLSS
+#if AU_HAS_DLSS || AU_HAS_OPENRR
     capture_openrr_matrix(u, n, t, v);
 #endif
     UPOST r_glUniformMatrix4fv(real, n, t, v); }
@@ -1165,7 +1168,7 @@ static int g_temporalFrame = -1, g_temporalValid;
 static float g_temporalScene[152], g_temporalPreviousScene[152];
 static void framegen_before_ui(ProgRec *program);
 static void framegen_after_scene(ProgRec *program);
-#if AU_HAS_DLSS
+#if AU_HAS_DLSS || AU_HAS_OPENRR
 static int g_dlssPresentedFrame = -100;   // last frame DLSS's output reached the window
 #endif
 static int g_postPresent;                 // the frame is on the window: UI follows, no jitter
@@ -1616,7 +1619,7 @@ static void gi_draw(GLenum mode, GLint first, GLsizei count)
     }
     int useHistory = program->giTemporal;
     int rayReconstruction = 0;
-#if AU_HAS_DLSS
+#if AU_HAS_DLSS || AU_HAS_OPENRR
     if (g_setDlssEnabled && (g_setDlssMode == 2 || g_setDlssMode == 3) && g_dlssState == 1 && g_dlssRR
         && g_frame - g_dlssPresentedFrame <= 2) { useHistory = 0; rayReconstruction = 1; }
 #endif
@@ -2024,7 +2027,7 @@ static void vox_use(ProgRec *p)
 // Vulkan device (image units 2-4). DLSS upscales them to the window in place of Hytale's own
 // scale-to-window draw, so Hytale's Render Scale setting is the DLSS render size. The DLSS runtime (nvngx_dlss.dll) is loaded from shaderpack\dlss.
 
-#if AU_HAS_DLSS
+#if AU_HAS_DLSS || AU_HAS_OPENRR
 #include "aud_dlss.h"
 #ifndef _WIN32
 __attribute__((used)) static const char linux_dlss_marker[] = "AURORA_LINUX_DLSS_V1";
@@ -2537,7 +2540,7 @@ static float halton(int i, int base)
 
 static void jitter_next_frame(void)
 {
-#if AU_HAS_DLSS
+#if AU_HAS_DLSS || AU_HAS_OPENRR
     if (g_setDlssJitter != 0 && g_dlssState == 1 && g_dlssProg && g_dlssW > 0 && g_frame - g_dlssPresentedFrame <= 2) {
             int phases = g_dlssW > 0 && g_dlssH > 0 ? (int)ceilf(8.0f * ((float)g_dlssOW / g_dlssW) * ((float)g_dlssOH / g_dlssH)) : 8;
             if (phases < 8) phases = 8;
@@ -2769,7 +2772,7 @@ static void apply_extras(ProgRec *p)
     if (p->locVoxGeo >= 0 || p->locVoxCol >= 0) vox_use(p);
     if (p->locMaterialLOD >= 0) {
         float bias = 0.0f;
-#if AU_HAS_DLSS
+#if AU_HAS_DLSS || AU_HAS_OPENRR
         if (g_setDlssEnabled && g_dlssW > 0 && g_dlssOW > 0) bias = log2f((float)g_dlssW / (float)g_dlssOW);
 #endif
         r_glUniform1f(p->locMaterialLOD, bias);
@@ -2983,7 +2986,7 @@ static void do_reload(void)
         DeleteFileW(path);
         g_traceRemaining = 800;
     }
-#if AU_HAS_DLSS
+#if AU_HAS_DLSS || AU_HAS_OPENRR
     if (pack_flag("programs\\_dlss_diagnose")) {
         wchar_t path[MAX_PATH];
         pack_path(path, "programs\\_dlss_diagnose");
@@ -3460,7 +3463,7 @@ static void display_value(const MenuOpt *m, wchar_t *out, int cap)
 #endif
             return;
         }
-#if AU_HAS_DLSS
+#if AU_HAS_DLSS || AU_HAS_OPENRR
         static const wchar_t *modes[] = {L"Performance", L"Balanced", L"Quality", L"Ultra Perf", L"Ultra Quality", L"DLAA"};
         int q = g_dlssOW > 0 ? dlss_quality(g_dlssW, g_dlssOW) : -1;
         if (g_dlssState == 1 && g_dlssOW > 0 && g_frame - g_dlssPresentedFrame <= 30)
@@ -3836,7 +3839,7 @@ static int menu_edit_mode(int foreground, SHORT altState)
 static RenderUIState render_ui_begin(void)
 {
     RenderUIState state = {0};
-#if AU_HAS_DLSS
+#if AU_HAS_DLSS || AU_HAS_OPENRR
     if (g_renderAppliedScale >= 100 || !g_postPresent) return state;
     GLint framebuffer = -1;
     r_glGetIntegerv(0x8ca6, &framebuffer);
