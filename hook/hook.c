@@ -2327,15 +2327,19 @@ static void dlss_draw(GLenum mode, GLint first, GLsizei count)
     }
     int rrRequested = g_setDlssMode == 2 || g_setDlssMode == 3;
     int rr = rrRequested && aud_rr_available();
-    static int lastRRRequest = -1;
-    if (lastRRRequest != rrRequested) {
-        lastRRRequest = rrRequested;
-        if (!rrRequested)
+    static int lastRRMode = -1;
+    if (lastRRMode != (int)g_setDlssMode) {
+        lastRRMode = (int)g_setDlssMode;
+        if (g_setDlssMode == 1)
             logf_("dlss: Super Resolution selected; Ray Reconstruction not requested");
+        else if (!rr && g_setOpenRR)
+            logf_("openrr: requested, but the AMD Vulkan backend is unavailable; GI remains on Original");
         else if (!rr)
-            logf_("dlss: Ray Reconstruction requested, but NVIDIA NGX reports it unavailable; falling back to Super Resolution");
+            logf_("dlss: Ray Reconstruction requested, but NVIDIA NGX reports it unavailable");
+        else if (g_setOpenRR)
+            logf_("openrr: AMD Vulkan Ray Reconstruction selected");
         else
-            logf_("dlss: NVIDIA NGX Ray Reconstruction selected; OpenRR is not the active backend");
+            logf_("dlss: NVIDIA NGX Ray Reconstruction selected");
     }
     int renderWidth = vp[2], renderHeight = vp[3];
     if (renderWidth < 32) renderWidth = 32;
@@ -2906,7 +2910,12 @@ static void settings_load(void)
     int modeDenoising = settings_num(txt, voxelGI ? "AU_PT_DENOISE" : "AU_SSGI_DENOISE", 1) > 0.5;
     int denoiser = (int)settings_num(txt, "AU_GI_DENOISER", 1);
     g_setDlssMode = modeDenoising && (denoiser == 2 || denoiser == 3) ? denoiser : 1;
+#ifdef _WIN32
     g_setOpenRR = g_setDlssMode == 3;
+#else
+    if (g_setDlssMode == 3) g_setDlssMode = 1;
+    g_setOpenRR = 0;
+#endif
     g_setDlssPreset = settings_num(txt, "AU_DLSS_PRESET", 0);
     g_setDlssRRPreset = settings_num(txt, "AU_DLSS_RR_PRESET", g_setDlssPreset);
     g_setDlssSharpness = fmin(1.0, fmax(0.0, settings_num(txt, "AU_DLSS_SHARPNESS", 0.2)));
