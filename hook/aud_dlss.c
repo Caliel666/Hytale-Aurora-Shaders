@@ -1029,6 +1029,7 @@ static int openrr_prepare_device(void)
     OPENRR_CHECK_VK(vkEndCommandBuffer)
     OPENRR_CHECK_VK(vkResetCommandBuffer)
     OPENRR_CHECK_VK(vkQueueSubmit)
+    OPENRR_CHECK_VK(vkQueueWaitIdle)
     OPENRR_CHECK_VK(vkWaitForFences)
     OPENRR_CHECK_VK(vkResetFences)
     OPENRR_CHECK_VK(vkCreateFence)
@@ -1402,8 +1403,10 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
     }
 
     LOG("openrr: all shared guide images created; initializing Vulkan ownership");
+    LOG("openrr: begin initial image command buffer (frame slot %d)", g_frameIdx);
     VkCommandBuffer cb = begin_cmd();
-    if (!cb) { release_feature(); return 0; }
+    if (!cb) { LOG("openrr: failed to begin initial image command buffer"); release_feature(); return 0; }
+    LOG("openrr: initial image command buffer recording");
     VkImageMemoryBarrier barriers[AUD_TEX_COUNT];
     unsigned barrierCount = 0;
     for (int i = 0; i < AUD_TEX_COUNT; ++i) {
@@ -1421,9 +1424,12 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
         barrier->subresourceRange.levelCount = 1;
         barrier->subresourceRange.layerCount = 1;
     }
+    LOG("openrr: recording initial UNDEFINED -> GENERAL transition (%u images)", barrierCount);
     vkCmdPipelineBarrier_(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                           0, 0, NULL, 0, NULL, barrierCount, barriers);
+    LOG("openrr: recording Vulkan -> OpenGL ownership release");
     barrier_all(cb, 0); // hand freshly initialized images to the GL context
+    LOG("openrr: ending initial image command buffer");
     if (!vk_ok(vkEndCommandBuffer_(cb), "end OpenRR image initialization")) {
         release_feature(); return 0;
     }
@@ -1432,8 +1438,13 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
     submit.pCommandBuffers = &cb;
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &g_semVKDone;
-    if (!vk_ok(vkQueueSubmit_(g_queue, 1, &submit, g_fence[g_frameIdx]), "submit OpenRR image initialization") ||
-        !vk_ok(vkQueueWaitIdle_(g_queue), "wait for OpenRR image initialization")) {
+    LOG("openrr: submitting initial image ownership transition (queue=%p, semaphore=%p, fence=%p)",
+        (void *)g_queue, (void *)g_semVKDone, (void *)g_fence[g_frameIdx]);
+    if (!vk_ok(vkQueueSubmit_(g_queue, 1, &submit, g_fence[g_frameIdx]), "submit OpenRR image initialization")) {
+        release_feature(); return 0;
+    }
+    LOG("openrr: initial Vulkan submit succeeded; waiting for queue idle");
+    if (!vk_ok(vkQueueWaitIdle_(g_queue), "wait for OpenRR image initialization")) {
         release_feature(); return 0;
     }
     GLuint textures[AUD_TEX_COUNT];
@@ -1443,12 +1454,15 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
         textures[textureCount] = g_img[i].glTex;
         layouts[textureCount++] = GL_LAYOUT_GENERAL_EXT;
     }
+    LOG("openrr: initial Vulkan queue idle; acquiring %u shared textures in OpenGL", textureCount);
     gl.WaitSemaphore(g_glSemVKDone, 0, NULL, textureCount, textures, layouts);
+    LOG("openrr: initial OpenGL semaphore wait returned");
     if (!gl_ok("OpenRR initial shared image acquisition")) {
         release_feature(); return 0;
     }
     g_frameIdx = (g_frameIdx + 1) % AUD_FRAMES;
     LOG("openrr: shared images initialized; creating runtime context");
+    LOG("openrr: entering runtime Create after successful Vulkan/OpenGL image hand-off");
     if (!openrr_create_context(renderW, renderH, outW, outH)) {
         release_feature();
         return 0;
