@@ -1,0 +1,55 @@
+name: Windows OpenRR build
+
+on:
+  push:
+    branches:
+      - feature/amd-openrr-wronggpu
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-openrr:
+    name: Build AMD OpenRR hook (without NVIDIA SDK)
+    runs-on: windows-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python for generated GL stubs
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build Windows hook and OpenRR payload
+        shell: pwsh
+        run: .\build.ps1
+
+      - name: Verify packaged OpenRR files
+        shell: pwsh
+        run: |
+          $required = @(
+            "build\opengl32.dll",
+            "build\OpenNrRrRuntime.dll",
+            "build\opennr-rr\shaders",
+            "build\opennr-rr\nvngx_dlssd.dll"
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "Required OpenRR build output is missing: $path"
+            }
+          }
+          if ((Get-Item "build\opennr-rr\nvngx_dlssd.dll").Length -lt 40000000) {
+            throw "The pinned DLSSD weight-source file is unexpectedly small."
+          }
+
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aurora-AMD-OpenRR-Windows
+          if-no-files-found: error
+          path: |
+            build/opengl32.dll
+            build/OpenNrRrRuntime.dll
+            build/opennr-rr/
