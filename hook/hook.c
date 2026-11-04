@@ -351,7 +351,7 @@ static void expand(Str *out, const char *text, int depth)
                             str_cstr(out, "\n#undef AU_DLSS\n#define AU_DLSS 0\n");
                     }
 #else
-                    if (!strcmp(name, "AU_Settings.glsl") && g_setOpenRR)
+                    if (!strcmp(name, "AU_Settings.glsl") && g_setOpenRR && g_dlssState != -1)
                         str_cstr(out, "\n#undef AU_DLSS\n#define AU_DLSS 1\n");
 #endif
                     str_cstr(out, "\n// END ");
@@ -2168,9 +2168,7 @@ static int dlss_ready(void)
             dl.IsEnabled && dl.Enable && dl.Disable && available)
             g_dlssState = 1;
         if (g_dlssState != 1) aud_shutdown();
-#ifndef _WIN32
         if (g_dlssState < 0) InterlockedExchange(&g_reloadRequested, 1);
-#endif
         if (g_dlssState == 1) {
             if (wantOpenRR)
                 logf_("openrr: ready (ABI 5 Vulkan backend on AMD; input guides shared from OpenGL)");
@@ -2361,9 +2359,7 @@ static void dlss_draw(GLenum mode, GLint first, GLsizei count)
 #endif
         if (!aud_configure(renderWidth, renderHeight, g_presentW, g_presentH, q, 1, rr, preset)) {
             g_dlssState = -1;
-#ifndef _WIN32
             InterlockedExchange(&g_reloadRequested, 1);
-#endif
             r_glDrawArrays(mode, first, count);
             return;
         }
@@ -2448,10 +2444,8 @@ static int dlss_present_rect(int x, int y, int w, int h, const char *how, int di
     g_jitterPx[1] = g_sceneJitter[1] * g_dlssH * 0.5f;
     if (!aud_evaluate(g_jitterPx[0] * (float)g_setJitterSX, g_jitterPx[1] * (float)g_setJitterSY,
                       (float)g_setMotionSX, (float)g_setMotionSY, g_dlssReset > 0 || g_setDlssDebug == 2)) {
-#ifndef _WIN32
-        g_dlssState = -1; // Restore native size on the next SDL resize sync.
+        g_dlssState = -1;
         InterlockedExchange(&g_reloadRequested, 1);
-#endif
         return 0;
     }
     if (g_dlssReset > 0) g_dlssReset--;
