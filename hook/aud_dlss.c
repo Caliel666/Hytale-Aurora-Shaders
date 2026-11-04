@@ -1317,7 +1317,9 @@ static void release_feature(void)
         g_openrrContext = NULL;
     }
 #endif
+#ifndef AU_OPENRR_ONLY
     if (g_feature) { ngxReleaseFeature(g_feature); g_feature = NULL; }
+#endif
     for (int i = 0; i < AUD_TEX_COUNT; i++) destroy_image(&g_img[i]);
 }
 
@@ -1405,6 +1407,7 @@ int aud_configure(int renderW, int renderH, int outW, int outH, int quality, int
 #ifdef _WIN32
     if (g_openrrMode) return rr ? aud_configure_openrr(renderW, renderH, outW, outH) : 0;
 #endif
+#ifndef AU_OPENRR_ONLY
     if (!g_ngxReady || !g_params || g_bridgeFailed) return 0;
     release_feature();
     g_rr = rr && g_rrAvailable;
@@ -1508,6 +1511,11 @@ int aud_configure(int renderW, int renderH, int outW, int outH, int quality, int
     if (g_rr)
         LOG("openrr: NOT in use; this frame is processed by NVIDIA NGX Ray Reconstruction");
     return 1;
+#else
+    (void)renderW; (void)renderH; (void)outW; (void)outH;
+    (void)quality; (void)hdr; (void)rr; (void)preset;
+    return 0;
+#endif
 }
 
 unsigned aud_texture(int which)
@@ -1520,6 +1528,7 @@ int aud_evaluate(float jitterX, float jitterY, float mvScaleX, float mvScaleY, i
 #ifdef _WIN32
     if (g_openrrMode) return aud_openrr_evaluate(jitterX, jitterY, mvScaleX, mvScaleY, reset);
 #endif
+#ifndef AU_OPENRR_ONLY
     if (!g_feature || g_bridgeFailed) return 0;
     VkCommandBuffer cb = begin_cmd();
     if (!cb) return 0;
@@ -1578,6 +1587,10 @@ int aud_evaluate(float jitterX, float jitterY, float mvScaleX, float mvScaleY, i
         return 0;
     }
     return 1;
+#else
+    (void)jitterX; (void)jitterY; (void)mvScaleX; (void)mvScaleY; (void)reset;
+    return 0;
+#endif
 }
 
 void aud_shutdown(void)
@@ -1595,6 +1608,7 @@ void aud_shutdown(void)
     }
     gl.Finish();
     release_feature();
+#ifndef AU_OPENRR_ONLY
     if (g_params && ngxDestroyParameters) { ngxDestroyParameters(g_params); g_params = NULL; }
     if (g_ngxReady && g_ownsDevice) {
         NVSDK_NGX_Result result = NVSDK_NGX_Result_FAIL_PlatformError;
@@ -1602,6 +1616,7 @@ void aud_shutdown(void)
         if (NVSDK_NGX_FAILED(result)) LOG("dlss: NGX shutdown failed 0x%x", result);
     }
     g_ngxReady = 0;
+#endif
     if (g_glSemGLDone) gl.DeleteSemaphores(1, &g_glSemGLDone);
     if (g_glSemVKDone) gl.DeleteSemaphores(1, &g_glSemVKDone);
     if (g_semGLDone) vkDestroySemaphore_(g_dev, g_semGLDone, NULL);
