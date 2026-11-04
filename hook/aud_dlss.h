@@ -22,9 +22,16 @@ enum {
     AUD_TEX_COUNT
 };
 
-// Vulkan device + NGX core; dllDir holds nvngx_dlss.dll, dataDir gets NGX's log/cache.
+// Vulkan device + NVIDIA NGX bridge; dllDir holds nvngx_dlss.dll, dataDir gets NGX's log/cache.
 // Returns 1 when DLSS super resolution is available on this machine.
 int aud_init(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *dllDir, const wchar_t *dataDir);
+#ifdef _WIN32
+// OpenRR ABI 5 on AMD RDNA4. runtimeDir contains OpenNrRrRuntime.dll; dataDir contains
+// shaders\\ and nvngx_dlssd.dll 310.9.1 (read only by OpenRR to rebuild its network).
+int aud_openrr_init(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *runtimeDir,
+                    const wchar_t *dataDir, const wchar_t *dlssdPath);
+int aud_openrr_available(void);
+#endif
 int aud_init_shared(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *dllDir, const wchar_t *dataDir, const AudVulkanContext *context);
 
 // 1 when DLSS Ray Reconstruction is available too (after aud_init).
