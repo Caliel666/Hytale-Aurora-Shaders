@@ -111,7 +111,7 @@ AU_RTX_SSR_STEPS | Material reflection steps | range 8 64 4 | 32
 AU_SSR_REFINED | Refined reflections | bool | 1 | Pins every reflection hit to the surface (no stepping), rejects the backs of surfaces, fades uncertain hits to the sky, and blurs rough reflections more the further the reflected surface is. Off restores the previous reflections.
 
 @ Path tracing
-AU_PATH_TRACING | Path tracing | bool | 0 | Voxel GI. Choose Original or NVIDIA DLSS Ray Reconstruction in the GI denoising tab.
+AU_PATH_TRACING | Path tracing | bool | 0 | Voxel GI. Choose Original, NVIDIA DLSS Ray Reconstruction, or OpenRR for AMD RDNA4 in the GI denoising tab.
 AU_PT_RAYS | Rays per pixel | range 1 8 1 | 3
 AU_PT_REACH | Ray reach | range 8.0 48.0 4.0 | 24.0
 AU_PT_SKY_LIGHT | Traced sky light | range 0.0 1.0 0.05 | 0.8
@@ -120,7 +120,7 @@ AU_PT_AMBIENT_BOUNCE | Multi-bounce sky light | range 0.0 2.0 0.1 | 1.0
 AU_VOXEL_DEBUG | Voxel view | enum 0:Off 1:Voxels 2:Blend | 0
 
 @ GI denoising
-AU_GI_DENOISER | Denoiser | enum 1:Original 2:NVIDIA_DLSS_RR | 1 | Original is the built-in single-pass denoiser. NVIDIA uses DLSS Ray Reconstruction when DLSS is enabled and supported; Original remains the fallback until that backend is ready.
+AU_GI_DENOISER | Denoiser | enum 1:Original 2:NVIDIA_DLSS_RR 3:OpenRR_AMD | 1 | Original is Aurora's built-in denoiser. NVIDIA uses NGX Ray Reconstruction on supported NVIDIA GPUs. OpenRR runs its Vulkan ABI 5 network on AMD RDNA4 (RX 9000); it builds its weights locally on first use.
 AU_GI_HISTORY_TAPS | History samples | enum 1:1_tap 4:4_taps 9:9_taps | 9 | Original history-gather cost. Nine samples smooth sparse lighting most; fewer reduce GPU work.
 AU_GI_SPATIAL_STRENGTH | Spatial filter strength | range 0.0 1.0 0.05 | 1.0 | Amount of same-surface lighting sharing in Original. Zero preserves each pixel's current ray sample.
 AU_GI_NORMAL_THRESHOLD | Spatial normal tolerance | range 0.01 0.25 0.01 | 0.05 | Limits sharing between surfaces with different normals. Lower values preserve more edges.
@@ -225,7 +225,7 @@ AU_RENDER_SCALE | Render resolution (live) | enum 0:Native 100:100%_DLAA 85:85%_
 !DLSS_INFO | Active render size | info
 AU_DLSS_SHARPNESS | DLSS sharpness | range 0.0 1.0 0.05 | 0.2 | Edge-limited sharpening after DLSS or Ray Reconstruction. Zero disables this pass. Independent of the pre-upscale Sharpening setting.
 AU_DLSS_PRESET | Super Resolution model | enum 0:NVIDIA_default 1:K_(sharpest) 2:J_(less_ghosting) | 0 | Selects the Super Resolution model. NVIDIA default lets the runtime choose.
-!DLSS_DENOISER_INFO | Lighting denoiser | info | 0 | Select Original or NVIDIA DLSS Ray Reconstruction in the GI denoising tab. NVIDIA requires DLSS enabled; 100 percent resolution uses DLAA with Ray Reconstruction.
+!DLSS_DENOISER_INFO | Lighting denoiser | info | 0 | Select Original, NVIDIA DLSS Ray Reconstruction, or OpenRR in the GI denoising tab. NVIDIA requires DLSS enabled. OpenRR uses AMD RDNA4 Vulkan and builds its network from the bundled 310.9.1 weight source on first use.
 AU_DLSS_RR_PRESET | Ray Reconstruction model | enum 0:NVIDIA_default 1:E_(sharpest) 2:D_(less_ghosting) | 0 | Selects the Ray Reconstruction model independently of the Super Resolution model.
 AU_DLSS_FRAMEGEN | DLSS Frame Generation | enum 0:Off 1:2x 2:3x 3:4x 5:6x | 0 | NVIDIA DLSS-G with Reflex and a Vulkan presentation bridge. Multiplier is limited to GPU support. Works independently of Super Resolution. Moving models currently rely on optical flow rather than object motion vectors.
 !DLSS_FG_INFO | Frame Generation status | info
