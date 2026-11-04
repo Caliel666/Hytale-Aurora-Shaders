@@ -82,7 +82,7 @@ $shaderRoot = Get-ChildItem $openrrDir -Directory -Recurse | Where-Object { $_.N
 $shaderFiles = @()
 if ($shaderRoot) { $shaderFiles = @(Get-ChildItem $shaderRoot.FullName -File -Recurse -Filter '*.spv') }
 if (-not $runtime) { throw "OpenRR $openrrVersion archive is missing OpenNrRrRuntime.dll. Archive contents: $((Get-ChildItem $openrrDir -Recurse | ForEach-Object FullName) -join '; ')" }
-if (-not $shaderRoot -or $shaderFiles.Count -eq 0) { throw "OpenRR $openrrVersion archive is missing opennr-rr\\shaders\\*.spv. Archive contents: $((Get-ChildItem $openrrDir -Recurse | ForEach-Object FullName) -join '; ')" }
+if (-not $shaderRoot -or $shaderFiles.Count -eq 0) { throw "OpenRR $openrrVersion archive is missing opennr-rr.shaders\*.spv. Archive contents: $((Get-ChildItem $openrrDir -Recurse | ForEach-Object FullName) -join '; ')" }
 Copy-Item $runtime.FullName (Join-Path $root 'build\\OpenNrRrRuntime.dll') -Force
 $stagedShaders = Join-Path $root 'build\\opennr-rr\\shaders'
 if (Test-Path $stagedShaders) { Remove-Item $stagedShaders -Recurse -Force }
