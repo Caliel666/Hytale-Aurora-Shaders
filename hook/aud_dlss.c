@@ -285,7 +285,9 @@ typedef struct {
     VkFormat format;
     unsigned w, h;
     GLuint glTex, glMem;
+#ifndef AU_OPENRR_ONLY
     NVSDK_NGX_Resource_VK res;
+#endif
 } AudImage;
 
 static AudImage g_img[AUD_TEX_COUNT];
@@ -424,6 +426,7 @@ static int create_image(AudImage *im, unsigned w, unsigned h, VkFormat vkFmt, GL
     im->format = vkFmt;
     im->w = w;
     im->h = h;
+#ifndef AU_OPENRR_ONLY
     memset(&im->res, 0, sizeof(im->res));
     im->res.Resource.ImageViewInfo.ImageView = im->view;
     im->res.Resource.ImageViewInfo.Image = im->image;
@@ -433,6 +436,7 @@ static int create_image(AudImage *im, unsigned w, unsigned h, VkFormat vkFmt, GL
     im->res.Resource.ImageViewInfo.Height = h;
     im->res.Type = NVSDK_NGX_RESOURCE_VK_TYPE_VK_IMAGEVIEW;
     im->res.ReadWrite = true;
+#endif
     return 1;
 }
 
@@ -467,6 +471,7 @@ static int create_semaphore(VkSemaphore *vk, GLuint *glSem)
     return gl_ok("shared semaphore import") && *glSem != 0;
 }
 
+#ifndef AU_OPENRR_ONLY
 // ----------------------------------------------------------------------------------------
 // Initialisation
 
@@ -805,6 +810,8 @@ int aud_init_shared(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *dllDir,
     return aud_init_context(log, glGetProc, dllDir, dataDir, context);
 }
 
+
+#endif // !AU_OPENRR_ONLY
 
 #ifdef _WIN32
 static void openrr_last_error(char *buffer, uint32_t size)
