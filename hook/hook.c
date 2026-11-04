@@ -2908,14 +2908,17 @@ static void settings_load(void)
     int denoiser = (int)settings_num(txt, "AU_GI_DENOISER", 1);
     g_setDlssMode = 1;
 #if AU_HAS_DLSS
-    if (modeDenoising && denoiser == 2) g_setDlssMode = 2;
+    if (denoiser == 2) g_setDlssMode = 2;
 #endif
 #if defined(_WIN32) && AU_HAS_OPENRR
-    if (modeDenoising && denoiser == 3) g_setDlssMode = 3;
+    if (denoiser == 3) g_setDlssMode = 3;
     g_setOpenRR = g_setDlssMode == 3;
 #else
     g_setOpenRR = 0;
 #endif
+    logf_("GI denoiser setting=%d original-filter=%d voxel-GI=%d backend=%s (OpenRR compiled=%d)",
+          denoiser, modeDenoising, voxelGI, g_setOpenRR ? "OpenRR" : g_setDlssMode == 2 ? "NVIDIA RR" : "Original",
+          (int)AU_HAS_OPENRR);
     g_setDlssPreset = settings_num(txt, "AU_DLSS_PRESET", 0);
     g_setDlssRRPreset = settings_num(txt, "AU_DLSS_RR_PRESET", g_setDlssPreset);
     g_setDlssSharpness = fmin(1.0, fmax(0.0, settings_num(txt, "AU_DLSS_SHARPNESS", 0.2)));
