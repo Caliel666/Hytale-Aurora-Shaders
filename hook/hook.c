@@ -2100,8 +2100,21 @@ static int dlss_quality(int renderW, int outW)
 
 static int dlss_ready(void)
 {
+#ifdef _WIN32
+    int wantOpenRR = g_setOpenRR;
+#else
+    int wantOpenRR = 0;
+#endif
+    static int activeBackend = -1;
+    if (g_dlssState != 0 && activeBackend != wantOpenRR) {
+        aud_shutdown();
+        g_dlssState = 0;
+        g_dlssW = g_dlssH = g_dlssOW = g_dlssOH = g_dlssNativeW = g_dlssNativeH = 0;
+        g_dlssRR = 0;
+    }
     if (g_dlssState == 0) {
         g_dlssState = -1;
+        activeBackend = wantOpenRR;
         wchar_t dir[MAX_PATH];
         pack_path(dir, "dlss");
         CreateDirectoryW(dir, NULL);
@@ -2114,23 +2127,57 @@ static int dlss_ready(void)
         dl.IsEnabled = (PFN_dlIsEnabled)dlss_getproc("glIsEnabled");
         dl.Enable = (PFN_dlEnable)dlss_getproc("glEnable");
         dl.Disable = (PFN_dlEnable)dlss_getproc("glDisable");
-        int available;
-#if AU_HAS_FRAMEGEN
-        AudVulkanContext context;
-        available = afg_vulkan_context(&context) ? aud_init_shared(logf_, dlss_getproc, dir, dir, &context) : aud_init(logf_, dlss_getproc, dir, dir);
-#else
-        available = aud_init(logf_, dlss_getproc, dir, dir);
+        int available = 0;
+#ifdef _WIN32
+        if (wantOpenRR) {
+            wchar_t clientDir[MAX_PATH], dataDir[MAX_PATH], dlssdPath[MAX_PATH];
+            DWORD length = GetModuleFileNameW(NULL, clientDir, MAX_PATH);
+            if (!length || length >= MAX_PATH) {
+                logf_("openrr: could not resolve the Hytale client directory (Windows error %lu)", (unsigned long)GetLastError());
+            } else {
+                wchar_t *slash = wcsrchr(clientDir, L'\\');
+                if (!slash) {
+                    logf_("openrr: Hytale executable path has no parent directory");
+                } else {
+                    *slash = 0;
+                    int dataLength = _snwprintf(dataDir, MAX_PATH, L"%ls\\opennr-rr", clientDir);
+                    int dllLength = _snwprintf(dlssdPath, MAX_PATH, L"%ls\\opennr-rr\\nvngx_dlssd.dll", clientDir);
+                    if (dataLength <= 0 || dataLength >= MAX_PATH || dllLength <= 0 || dllLength >= MAX_PATH) {
+                        logf_("openrr: client data path exceeds MAX_PATH");
+                    } else {
+                        available = aud_openrr_init(logf_, dlss_getproc, clientDir, dataDir, dlssdPath);
+                    }
+                }
+            }
+        } else
 #endif
+        {
+#if AU_HAS_FRAMEGEN
+            AudVulkanContext context;
+            available = afg_vulkan_context(&context)
+                ? aud_init_shared(logf_, dlss_getproc, dir, dir, &context)
+                : aud_init(logf_, dlss_getproc, dir, dir);
+#else
+            available = aud_init(logf_, dlss_getproc, dir, dir);
+#endif
+        }
         if (r_glBindImageTexture && r_glMemoryBarrier && dl.Blit && dl.GenFb && dl.BindFb && dl.FbTex &&
             dl.IsEnabled && dl.Enable && dl.Disable && available)
             g_dlssState = 1;
+        if (g_dlssState != 1) aud_shutdown();
 #ifndef _WIN32
         if (g_dlssState < 0) InterlockedExchange(&g_reloadRequested, 1);
 #endif
-        logf_("dlss: %s", g_dlssState == 1 ? "ready (NVIDIA NGX backend)" : "unavailable, the game upscales as usual");
-        // OpenRR 0.1.0 is currently staged by the build, but this OpenGL hook has not
-        // connected its API. Be explicit so an RR request is never mistaken for OpenRR use.
-        logf_("openrr: runtime assets may be installed, but OpenRR is NOT initialized or executing; current RR path is NVIDIA NGX only");
+        if (g_dlssState == 1) {
+            if (wantOpenRR)
+                logf_("openrr: ready (ABI 5 Vulkan backend on AMD; input guides shared from OpenGL)");
+            else
+                logf_("dlss: ready (NVIDIA NGX backend)");
+        } else if (wantOpenRR) {
+            logf_("openrr: unavailable; GI keeps Aurora's Original denoiser");
+        } else {
+            logf_("dlss: unavailable, the game upscales as usual");
+        }
     }
     return g_dlssState == 1;
 }
