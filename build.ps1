@@ -75,15 +75,17 @@ if (-not (Test-Path (Join-Path $openrrDir 'OpenNrRrRuntime.dll'))) {
 # Release archive layout: OpenNrRrRuntime.dll at the root and opennr-rr\\shaders\\*.spv.
 # Validate the actual payload rather than assuming the shader folder is a direct child.
 $runtime = Get-ChildItem $openrrDir -File -Filter 'OpenNrRrRuntime.dll' -Recurse | Select-Object -First 1
-$shaderFiles = @(Get-ChildItem $openrrDir -File -Filter '*.spv' -Recurse)
+$shaderRoot = Get-ChildItem $openrrDir -Directory -Filter 'shaders' -Recurse | Select-Object -First 1
+$shaderFiles = @()
+if ($shaderRoot) { $shaderFiles = @(Get-ChildItem $shaderRoot.FullName -File -Recurse -Filter '*.spv') }
 if (-not $runtime) { throw "OpenRR $openrrVersion archive is missing OpenNrRrRuntime.dll. Archive contents: $((Get-ChildItem $openrrDir -Recurse | ForEach-Object FullName) -join '; ')" }
-if ($shaderFiles.Count -eq 0) { throw "OpenRR $openrrVersion archive contains no SPIR-V shader files. Archive contents: $((Get-ChildItem $openrrDir -Recurse | ForEach-Object FullName) -join '; ')" }
+if (-not $shaderRoot -or $shaderFiles.Count -eq 0) { throw "OpenRR $openrrVersion archive is missing opennr-rr\\shaders\\*.spv. Archive contents: $((Get-ChildItem $openrrDir -Recurse | ForEach-Object FullName) -join '; ')" }
 Copy-Item $runtime.FullName (Join-Path $root 'build\\OpenNrRrRuntime.dll') -Force
-$stagedShaders = Join-Path $root 'build\\opennr-rr'
+$stagedShaders = Join-Path $root 'build\\opennr-rr\\shaders'
 if (Test-Path $stagedShaders) { Remove-Item $stagedShaders -Recurse -Force }
 New-Item -ItemType Directory -Force $stagedShaders | Out-Null
 foreach ($shader in $shaderFiles) {
-    $relative = $shader.FullName.Substring($openrrDir.TrimEnd('\\').Length).TrimStart('\\')
+    $relative = $shader.FullName.Substring($shaderRoot.FullName.TrimEnd('\\').Length).TrimStart('\\')
     $destination = Join-Path $stagedShaders $relative
     New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
     Copy-Item $shader.FullName $destination -Force
