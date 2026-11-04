@@ -36,6 +36,33 @@ New-Item -ItemType Directory -Force (Join-Path $root 'build') | Out-Null
 $stubs = Join-Path $root 'hook\gl_stubs.c'
 if (-not (Test-Path $stubs)) { & python -I (Join-Path $root 'tools\gen_stubs.py') }
 
+$vulkanHeader = Join-Path $root 'third_party\vulkan\include\vulkan\vulkan.h'
+if (-not (Test-Path -LiteralPath $vulkanHeader)) {
+    # OpenRR needs only Vulkan headers, not the NVIDIA SDK or Vulkan import library.
+    # Pin the Khronos headers version to keep the ABI declarations deterministic.
+    $vulkanHeadersVersion = '1.4.363'
+    $vulkanTemp = Join-Path ([IO.Path]::GetTempPath()) "aurora-vulkan-headers-$vulkanHeadersVersion"
+    $vulkanZip = Join-Path ([IO.Path]::GetTempPath()) "aurora-vulkan-headers-$vulkanHeadersVersion.zip"
+    if (Test-Path -LiteralPath $vulkanTemp) { Remove-Item -LiteralPath $vulkanTemp -Recurse -Force }
+    New-Item -ItemType Directory -Force $vulkanTemp | Out-Null
+    try {
+        Write-Host "Downloading Khronos Vulkan-Headers $vulkanHeadersVersion for OpenRR..."
+        Invoke-WebRequest "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v$vulkanHeadersVersion.zip" -OutFile $vulkanZip -UseBasicParsing
+        Expand-Archive -LiteralPath $vulkanZip -DestinationPath $vulkanTemp -Force
+        $source = Get-ChildItem -LiteralPath $vulkanTemp -Directory | Select-Object -First 1
+        $sourceInclude = if ($source) { Join-Path $source.FullName 'include' } else { $null }
+        if (-not $sourceInclude -or -not (Test-Path -LiteralPath (Join-Path $sourceInclude 'vulkan\vulkan.h'))) {
+            throw "Khronos Vulkan-Headers $vulkanHeadersVersion archive is missing include\vulkan\vulkan.h."
+        }
+        $vulkanInclude = Join-Path $root 'third_party\vulkan\include'
+        New-Item -ItemType Directory -Force $vulkanInclude | Out-Null
+        Copy-Item -Path (Join-Path $sourceInclude '*') -Destination $vulkanInclude -Recurse -Force
+    } finally {
+        Remove-Item -LiteralPath $vulkanTemp -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $vulkanZip -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Push-Location (Join-Path $root 'hook')
 try {
     $vulkanHeader = Join-Path $root 'third_party\vulkan\include\vulkan\vulkan.h'
