@@ -1293,7 +1293,7 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
         LOG("openrr: RecordVk failed: %s", error[0] ? error : "unknown runtime error");
         return 0;
     }
-    if ((frameNumber % 300) == 1 && g_openrrApi.v4.v3.v2.v1.GetInfo) {
+    if ((frameNumber <= 4 || (frameNumber % 300) == 1) && g_openrrApi.v4.v3.v2.v1.GetInfo) {
         OnrRrInfo info;
         memset(&info, 0, sizeof(info));
         info.size = sizeof(info);
