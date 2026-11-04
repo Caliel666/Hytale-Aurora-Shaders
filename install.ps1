@@ -151,6 +151,8 @@ foreach ($process in Get-Process HytaleClient -ErrorAction SilentlyContinue) {
 }
 
 $dll = Client-Child 'opengl32.dll'
+$openrrRuntime = Client-Child 'OpenNrRrRuntime.dll'
+$openrrData = Client-Child 'opennr-rr'
 $link = Client-Child 'shaderpack'
 $receiptPath = Client-Child '.aurora-install.json'
 $receipt = $null
@@ -175,6 +177,12 @@ if ($Uninstall) {
     New-Item -ItemType Directory -Path $recovery -Force | Out-Null
     if (Test-Path -LiteralPath $dll) {
         Move-Item -LiteralPath $dll -Destination (Join-Path $recovery 'opengl32.dll')
+    }
+    if (Test-Path -LiteralPath $openrrRuntime) {
+        Move-Item -LiteralPath $openrrRuntime -Destination (Join-Path $recovery 'OpenNrRrRuntime.dll')
+    }
+    if (Test-Path -LiteralPath $openrrData) {
+        Move-Item -LiteralPath $openrrData -Destination (Join-Path $recovery 'opennr-rr')
     }
     if ($existingPack) {
         if ($isLink) { $existingPack.Delete() }
@@ -279,6 +287,17 @@ try {
         }
     }
     Copy-Item -LiteralPath $source -Destination $dll -Force
+    # OpenRR resolves its runtime DLL beside opengl32.dll and its SPIR-V payload
+    # from the sibling opennr-rr directory. Deploy both into the actual client.
+    $openrrRuntimeSource = Join-Path $root 'build\\OpenNrRrRuntime.dll'
+    $openrrDataSource = Join-Path $root 'build\\opennr-rr'
+    if (-not (Test-Path -LiteralPath $openrrRuntimeSource -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $openrrDataSource 'shaders') -PathType Container)) {
+        throw 'OpenRR build payload is incomplete; refusing to install a hook without its runtime assets.'
+    }
+    Copy-Item -LiteralPath $openrrRuntimeSource -Destination $openrrRuntime -Force
+    if (Test-Path -LiteralPath $openrrData) { Remove-Item -LiteralPath $openrrData -Recurse -Force }
+    Copy-Item -LiteralPath $openrrDataSource -Destination $openrrData -Recurse -Force
     $hash = (Get-FileHash -LiteralPath $source).Hash
     if ((Get-FileHash -LiteralPath $dll).Hash -ne $hash) { throw 'Installed DLL checksum mismatch.' }
     $metadataChanged = $true
