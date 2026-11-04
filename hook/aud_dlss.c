@@ -867,7 +867,7 @@ static int openrr_prepare_device(void)
         LOG("openrr: no AMD Vulkan adapter matching the OpenGL device (or more than one unmatched AMD adapter)");
         return 0;
     }
-    g_openrrApiVersion = selectedProps.properties.apiVersion;
+    g_openrrApiVersion = VK_API_VERSION_1_3;
     if (g_openrrApiVersion < VK_API_VERSION_1_3) {
         LOG("openrr: Vulkan 1.3 is required (adapter reports %u.%u.%u)",
             VK_VERSION_MAJOR(g_openrrApiVersion), VK_VERSION_MINOR(g_openrrApiVersion), VK_VERSION_PATCH(g_openrrApiVersion));
@@ -1326,6 +1326,7 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
     }
     vkCmdPipelineBarrier_(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                           0, 0, NULL, 0, NULL, barrierCount, barriers);
+    barrier_all(cb, 0); // hand freshly initialized images to the GL context
     if (!vk_ok(vkEndCommandBuffer_(cb), "end OpenRR image initialization")) {
         release_feature(); return 0;
     }
