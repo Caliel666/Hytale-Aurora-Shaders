@@ -55,4 +55,28 @@ try {
     & $zig cc -target x86_64-windows-gnu -O2 -shared -o ..\build\opengl32.dll hook.c gl_stubs.c @dlss -lgdi32 -luser32
     if ($LASTEXITCODE -ne 0) { throw "zig cc failed ($LASTEXITCODE)" }
 } finally { Pop-Location }
-Write-Host "Built $(Join-Path $root 'build\opengl32.dll')"
+# OpenRR is shipped as its upstream runtime DLL plus the matching SPIR-V kernels.
+# Keep the version pinned so the runtime ABI and shader set always match.
+$openrrVersion = '0.1.0'
+$openrrSha256 = '6c85ce54087836fe2d8e88e6b1e8b037ca1c432164fd28e4da3652b4bae833e6'
+$openrrDir = Join-Path $root 'tools\openrr'
+$openrrZip = Join-Path $root 'tools\openrr-0.1.0.zip'
+$openrrUrl = "https://github.com/OpenNeuralRendering/OpenRR/releases/download/v$openrrVersion/openrr-$openrrVersion.zip"
+if (-not (Test-Path (Join-Path $openrrDir 'OpenNrRrRuntime.dll'))) {
+    New-Item -ItemType Directory -Force $openrrDir | Out-Null
+    if (-not (Test-Path $openrrZip)) {
+        Write-Host "Downloading OpenRR $openrrVersion runtime..."
+        Invoke-WebRequest $openrrUrl -OutFile $openrrZip -UseBasicParsing
+    }
+    $actualHash = (Get-FileHash $openrrZip -Algorithm SHA256).Hash.ToLower()
+    if ($actualHash -ne $openrrSha256) { throw "OpenRR archive checksum mismatch (got $actualHash)." }
+    Expand-Archive -Path $openrrZip -DestinationPath $openrrDir -Force
+}
+$runtime = Get-ChildItem $openrrDir -Filter 'OpenNrRrRuntime.dll' -Recurse | Select-Object -First 1
+$shaderDir = Get-ChildItem $openrrDir -Directory -Filter 'opennr-rr' -Recurse | Select-Object -First 1
+if (-not $runtime -or -not $shaderDir) { throw "OpenRR $openrrVersion archive is missing its runtime DLL or shader directory." }
+Copy-Item $runtime.FullName (Join-Path $root 'build\OpenNrRrRuntime.dll') -Force
+$stagedShaders = Join-Path $root 'build\opennr-rr'
+if (Test-Path $stagedShaders) { Remove-Item $stagedShaders -Recurse -Force }
+Copy-Item $shaderDir.FullName $stagedShaders -Recurse -Force
+Write-Host "Built $(Join-Path $root 'build\opengl32.dll') with OpenRR $openrrVersion runtime assets."
