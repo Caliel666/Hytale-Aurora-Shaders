@@ -72,11 +72,20 @@ if (-not (Test-Path (Join-Path $openrrDir 'OpenNrRrRuntime.dll'))) {
     if ($actualHash -ne $openrrSha256) { throw "OpenRR archive checksum mismatch (got $actualHash)." }
     Expand-Archive -Path $openrrZip -DestinationPath $openrrDir -Force
 }
-$runtime = Get-ChildItem $openrrDir -Filter 'OpenNrRrRuntime.dll' -Recurse | Select-Object -First 1
-$shaderDir = Get-ChildItem $openrrDir -Directory -Filter 'opennr-rr' -Recurse | Select-Object -First 1
-if (-not $runtime -or -not $shaderDir) { throw "OpenRR $openrrVersion archive is missing its runtime DLL or shader directory." }
-Copy-Item $runtime.FullName (Join-Path $root 'build\OpenNrRrRuntime.dll') -Force
-$stagedShaders = Join-Path $root 'build\opennr-rr'
+# Release archive layout: OpenNrRrRuntime.dll at the root and opennr-rr\\shaders\\*.spv.
+# Validate the actual payload rather than assuming the shader folder is a direct child.
+$runtime = Get-ChildItem $openrrDir -File -Filter 'OpenNrRrRuntime.dll' -Recurse | Select-Object -First 1
+$shaderFiles = @(Get-ChildItem $openrrDir -File -Filter '*.spv' -Recurse)
+if (-not $runtime) { throw "OpenRR $openrrVersion archive is missing OpenNrRrRuntime.dll. Archive contents: $((Get-ChildItem $openrrDir -Recurse | ForEach-Object FullName) -join '; ')" }
+if ($shaderFiles.Count -eq 0) { throw "OpenRR $openrrVersion archive contains no SPIR-V shader files. Archive contents: $((Get-ChildItem $openrrDir -Recurse | ForEach-Object FullName) -join '; ')" }
+Copy-Item $runtime.FullName (Join-Path $root 'build\\OpenNrRrRuntime.dll') -Force
+$stagedShaders = Join-Path $root 'build\\opennr-rr'
 if (Test-Path $stagedShaders) { Remove-Item $stagedShaders -Recurse -Force }
-Copy-Item $shaderDir.FullName $stagedShaders -Recurse -Force
+New-Item -ItemType Directory -Force $stagedShaders | Out-Null
+foreach ($shader in $shaderFiles) {
+    $relative = $shader.FullName.Substring($openrrDir.TrimEnd('\\').Length).TrimStart('\\')
+    $destination = Join-Path $stagedShaders $relative
+    New-Item -ItemType Directory -Force (Split-Path $destination -Parent) | Out-Null
+    Copy-Item $shader.FullName $destination -Force
+}
 Write-Host "Built $(Join-Path $root 'build\opengl32.dll') with OpenRR $openrrVersion runtime assets."
