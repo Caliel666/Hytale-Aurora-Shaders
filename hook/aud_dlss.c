@@ -75,6 +75,8 @@ static VkFence g_fence[AUD_FRAMES];
 static int g_frameIdx;
 static int g_bridgeFailed;
 static VkPhysicalDeviceMemoryProperties g_memProps;
+static VkCommandBuffer begin_cmd(void);
+static void barrier_all(VkCommandBuffer cb, int acquire);
 
 // ----------------------------------------------------------------------------------------
 // NGX core (driver) entry points
@@ -1231,6 +1233,9 @@ static VkCommandBuffer begin_cmd(void)
 
 int aud_rr_available(void)
 {
+#ifdef _WIN32
+    if (g_openrrMode) return g_openrrReady;
+#endif
     return g_rrAvailable;
 }
 
@@ -1262,12 +1267,104 @@ static void release_feature(void)
     if (!g_dev) return;
     gl.Finish();
     vkDeviceWaitIdle_(g_dev);
+#ifdef _WIN32
+    if (g_openrrMode && g_openrrContext) {
+        int32_t status = g_openrrApi.v4.v3.v2.v1.Destroy(g_openrrContext);
+        if (status != ONR_RR_OK) {
+            char error[512] = {0};
+            openrr_last_error(error, sizeof(error));
+            LOG("openrr: runtime Destroy failed: %s", error[0] ? error : "unknown runtime error");
+        }
+        g_openrrContext = NULL;
+    }
+#endif
     if (g_feature) { ngxReleaseFeature(g_feature); g_feature = NULL; }
     for (int i = 0; i < AUD_TEX_COUNT; i++) destroy_image(&g_img[i]);
 }
 
+#ifdef _WIN32
+static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
+{
+    if (!g_openrrReady || g_bridgeFailed || renderW <= 0 || renderH <= 0 || outW <= 0 || outH <= 0)
+        return 0;
+    release_feature();
+    g_rr = 1;
+    g_renderW = renderW; g_renderH = renderH;
+    g_outW = outW; g_outH = outH;
+    if (!create_image(&g_img[AUD_TEX_COLOR], renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT, GL_RGBA16F) ||
+        !create_image(&g_img[AUD_TEX_DEPTH], renderW, renderH, VK_FORMAT_R32_SFLOAT, GL_R32F) ||
+        !create_image(&g_img[AUD_TEX_MOTION], renderW, renderH, VK_FORMAT_R16G16_SFLOAT, GL_RG16F) ||
+        !create_image(&g_img[AUD_TEX_OUTPUT], outW, outH, VK_FORMAT_R16G16B16A16_SFLOAT, GL_RGBA16F) ||
+        !create_image(&g_img[AUD_TEX_RESPONSIVE], renderW, renderH, VK_FORMAT_R8_UNORM, 0x8229) ||
+        !create_image(&g_img[AUD_TEX_ALBEDO], renderW, renderH, VK_FORMAT_R8G8B8A8_UNORM, GL_RGBA8) ||
+        !create_image(&g_img[AUD_TEX_SPECULAR], renderW, renderH, VK_FORMAT_R8G8B8A8_UNORM, GL_RGBA8) ||
+        !create_image(&g_img[AUD_TEX_NORMALS], renderW, renderH, VK_FORMAT_R16G16B16A16_SFLOAT, GL_RGBA16F)) {
+        LOG("openrr: failed to create the GL/Vulkan shared guide images");
+        release_feature();
+        return 0;
+    }
+
+    VkCommandBuffer cb = begin_cmd();
+    if (!cb) { release_feature(); return 0; }
+    VkImageMemoryBarrier barriers[AUD_TEX_COUNT];
+    unsigned barrierCount = 0;
+    for (int i = 0; i < AUD_TEX_COUNT; ++i) {
+        if (!g_img[i].image) continue;
+        VkImageMemoryBarrier *barrier = &barriers[barrierCount++];
+        memset(barrier, 0, sizeof(*barrier));
+        barrier->sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier->dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier->oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier->newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        barrier->srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier->dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier->image = g_img[i].image;
+        barrier->subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier->subresourceRange.levelCount = 1;
+        barrier->subresourceRange.layerCount = 1;
+    }
+    vkCmdPipelineBarrier_(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                          0, 0, NULL, 0, NULL, barrierCount, barriers);
+    if (!vk_ok(vkEndCommandBuffer_(cb), "end OpenRR image initialization")) {
+        release_feature(); return 0;
+    }
+    VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &cb;
+    submit.signalSemaphoreCount = 1;
+    submit.pSignalSemaphores = &g_semVKDone;
+    if (!vk_ok(vkQueueSubmit_(g_queue, 1, &submit, g_fence[g_frameIdx]), "submit OpenRR image initialization") ||
+        !vk_ok(vkQueueWaitIdle_(g_queue), "wait for OpenRR image initialization")) {
+        release_feature(); return 0;
+    }
+    GLuint textures[AUD_TEX_COUNT];
+    GLenum layouts[AUD_TEX_COUNT];
+    GLuint textureCount = 0;
+    for (int i = 0; i < AUD_TEX_COUNT; ++i) if (g_img[i].glTex) {
+        textures[textureCount] = g_img[i].glTex;
+        layouts[textureCount++] = GL_LAYOUT_GENERAL_EXT;
+    }
+    gl.WaitSemaphore(g_glSemVKDone, 0, NULL, textureCount, textures, layouts);
+    if (!gl_ok("OpenRR initial shared image acquisition")) {
+        release_feature(); return 0;
+    }
+    g_frameIdx = (g_frameIdx + 1) % AUD_FRAMES;
+    if (!openrr_create_context(renderW, renderH, outW, outH)) {
+        release_feature();
+        return 0;
+    }
+    LOG("openrr: shared frame guides ready (%dx%d -> %dx%d; linear depth, world normals, packed roughness)",
+        renderW, renderH, outW, outH);
+    return 1;
+}
+#endif
+
+
 int aud_configure(int renderW, int renderH, int outW, int outH, int quality, int hdr, int rr, int preset)
 {
+#ifdef _WIN32
+    if (g_openrrMode) return rr ? aud_configure_openrr(renderW, renderH, outW, outH) : 0;
+#endif
     if (!g_ngxReady || !g_params || g_bridgeFailed) return 0;
     release_feature();
     g_rr = rr && g_rrAvailable;
@@ -1380,6 +1477,9 @@ unsigned aud_texture(int which)
 
 int aud_evaluate(float jitterX, float jitterY, float mvScaleX, float mvScaleY, int reset)
 {
+#ifdef _WIN32
+    if (g_openrrMode) return aud_openrr_evaluate(jitterX, jitterY, mvScaleX, mvScaleY, reset);
+#endif
     if (!g_feature || g_bridgeFailed) return 0;
     VkCommandBuffer cb = begin_cmd();
     if (!cb) return 0;
@@ -1444,12 +1544,18 @@ void aud_shutdown(void)
 {
     if (!g_dev) {
         if (g_inst && g_ownsDevice && vkDestroyInstance_) vkDestroyInstance_(g_inst, NULL);
+#ifdef _WIN32
+        if (g_openrrDll) FreeLibrary(g_openrrDll);
+        g_openrrDll = NULL; g_openrrGetApi = NULL; g_openrrContext = NULL;
+        g_openrrMode = g_openrrReady = 0;
+        memset(&g_openrrApi, 0, sizeof(g_openrrApi));
+#endif
         g_inst = VK_NULL_HANDLE; g_phys = VK_NULL_HANDLE;
         return;
     }
     gl.Finish();
     release_feature();
-    if (g_params) { ngxDestroyParameters(g_params); g_params = NULL; }
+    if (g_params && ngxDestroyParameters) { ngxDestroyParameters(g_params); g_params = NULL; }
     if (g_ngxReady && g_ownsDevice) {
         NVSDK_NGX_Result result = NVSDK_NGX_Result_FAIL_PlatformError;
         ngxShutdown1(g_dev, &result);
@@ -1473,5 +1579,17 @@ void aud_shutdown(void)
     g_pool = VK_NULL_HANDLE; g_semGLDone = g_semVKDone = VK_NULL_HANDLE;
     g_glSemGLDone = g_glSemVKDone = 0; g_frameIdx = 0;
     g_bridgeFailed = 0;
+
     g_rrAvailable = g_rr = 0;
+    g_ngxReady = 0;
+    g_ownsDevice = 0;
+#ifdef _WIN32
+    if (g_openrrDll) FreeLibrary(g_openrrDll);
+    g_openrrDll = NULL; g_openrrGetApi = NULL; g_openrrContext = NULL;
+    g_openrrMode = g_openrrReady = 0;
+    g_openrrQueueFamily = g_openrrQueueIndex = g_openrrApiVersion = 0;
+    g_openrrInfoFrame = 0;
+    g_openrrDataDir[0] = g_openrrDlssdPath[0] = 0;
+    memset(&g_openrrApi, 0, sizeof(g_openrrApi));
+#endif
 }
