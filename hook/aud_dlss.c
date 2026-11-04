@@ -1604,6 +1604,8 @@ void aud_shutdown(void)
         memset(&g_openrrApi, 0, sizeof(g_openrrApi));
 #endif
         g_inst = VK_NULL_HANDLE; g_phys = VK_NULL_HANDLE;
+        g_rrAvailable = g_rr = 0;
+        g_ownsDevice = 0;
         return;
     }
     gl.Finish();
@@ -1636,7 +1638,9 @@ void aud_shutdown(void)
     g_bridgeFailed = 0;
 
     g_rrAvailable = g_rr = 0;
+#ifndef AU_OPENRR_ONLY
     g_ngxReady = 0;
+#endif
     g_ownsDevice = 0;
 #ifdef _WIN32
     if (g_openrrDll) FreeLibrary(g_openrrDll);
@@ -1648,3 +1652,17 @@ void aud_shutdown(void)
     memset(&g_openrrApi, 0, sizeof(g_openrrApi));
 #endif
 }
+
+#ifdef AU_OPENRR_ONLY
+int aud_init(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *dllDir, const wchar_t *dataDir)
+{
+    (void)log; (void)glGetProc; (void)dllDir; (void)dataDir;
+    return 0;
+}
+int aud_init_shared(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *dllDir,
+                    const wchar_t *dataDir, const AudVulkanContext *context)
+{
+    (void)log; (void)glGetProc; (void)dllDir; (void)dataDir; (void)context;
+    return 0;
+}
+#endif
