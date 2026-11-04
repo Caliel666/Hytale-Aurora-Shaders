@@ -233,6 +233,18 @@ try {
         if (-not $owned -and -not $previousDllName) { $previousDllName = [IO.Path]::GetFileName($rollbackDll) }
         Remove-Item -LiteralPath $dll
     }
+    $rollbackOpenRrRuntime = Client-Child ".aurora-openrr-runtime-rollback.$stamp"
+    $rollbackOpenRrData = Client-Child ".aurora-openrr-data-rollback.$stamp"
+    $openRrRuntimeSaved = $false
+    $openRrDataSaved = $false
+    if (Test-Path -LiteralPath $openrrRuntime) {
+        Move-Item -LiteralPath $openrrRuntime -Destination $rollbackOpenRrRuntime
+        $openRrRuntimeSaved = $true
+    }
+    if (Test-Path -LiteralPath $openrrData) {
+        Move-Item -LiteralPath $openrrData -Destination $rollbackOpenRrData
+        $openRrDataSaved = $true
+    }
     if ($existingPack) {
         Move-Item -LiteralPath $link -Destination $rollbackPack
         $packMoved = $true
@@ -313,6 +325,10 @@ try {
         if ($null -ne $oldConfig) { [IO.File]::WriteAllBytes($configFile, $oldConfig) }
         elseif (Test-Path -LiteralPath $configFile) { Remove-Item -LiteralPath $configFile }
     }
+    if (Test-Path -LiteralPath $openrrRuntime) { Remove-Item -LiteralPath $openrrRuntime -Force }
+    if (Test-Path -LiteralPath $openrrData) { Remove-Item -LiteralPath $openrrData -Recurse -Force }
+    if ($openRrRuntimeSaved -and (Test-Path -LiteralPath $rollbackOpenRrRuntime)) { Move-Item -LiteralPath $rollbackOpenRrRuntime -Destination $openrrRuntime }
+    if ($openRrDataSaved -and (Test-Path -LiteralPath $rollbackOpenRrData)) { Move-Item -LiteralPath $rollbackOpenRrData -Destination $openrrData }
     if ($newPackCreated -and (Test-Path -LiteralPath $link)) {
         $newPack = Get-Item -LiteralPath $link -Force
         if ($newPack.Attributes -band [IO.FileAttributes]::ReparsePoint) { $newPack.Delete() }
