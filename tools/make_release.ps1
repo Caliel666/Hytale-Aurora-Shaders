@@ -34,6 +34,18 @@ try {
 Remove-Item -LiteralPath $snapshot
 New-Item -ItemType Directory -Force (Join-Path $stage 'bin') | Out-Null
 Copy-Item (Join-Path $root 'build\opengl32.dll') (Join-Path $stage 'bin\opengl32.dll')
+# The hook loads OpenRR beside opengl32.dll and its shader/weight data from build\opennr-rr.
+$openrrRuntime = Join-Path $root 'build\OpenNrRrRuntime.dll'
+$openrrData = Join-Path $root 'build\opennr-rr'
+if (-not (Test-Path -LiteralPath $openrrRuntime -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $openrrData 'shaders') -PathType Container) -or
+    -not (Test-Path -LiteralPath (Join-Path $openrrData 'nvngx_dlssd.dll') -PathType Leaf)) {
+    throw 'OpenRR release payload missing: runtime DLL, shaders, or DLSSD 310.9.1 weight source.'
+}
+$stageBuild = Join-Path $stage 'build'
+New-Item -ItemType Directory -Force $stageBuild | Out-Null
+Copy-Item -LiteralPath $openrrRuntime -Destination (Join-Path $stageBuild 'OpenNrRrRuntime.dll') -Force
+Copy-Item -LiteralPath $openrrData -Destination (Join-Path $stageBuild 'opennr-rr') -Recurse -Force
 # NVIDIA's DLSS runtime (not in git; redistributable under the DLSS SDK license, shipped with it).
 $dlss = Join-Path $root 'shaderpack\dlss'
 if (Test-Path (Join-Path $dlss 'nvngx_dlss.dll')) {
