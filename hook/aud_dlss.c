@@ -81,6 +81,7 @@ static VkCommandBuffer begin_cmd(void);
 static void barrier_all(VkCommandBuffer cb, int acquire);
 
 // ----------------------------------------------------------------------------------------
+#ifndef AU_OPENRR_ONLY
 // NGX core (driver) entry points
 
 typedef NVSDK_NGX_Result (*PFN_NGX_RequiredExtensions)(unsigned int *, const char ***, unsigned int *, const char ***);
@@ -163,6 +164,34 @@ static uint32_t g_openrrQueueFamily, g_openrrQueueIndex, g_openrrApiVersion;
 static wchar_t g_openrrDataDir[MAX_PATH], g_openrrDlssdPath[MAX_PATH];
 static unsigned g_openrrInfoFrame;
 #endif
+
+#else // AU_OPENRR_ONLY
+typedef HMODULE AudLibrary;
+#define aud_symbol GetProcAddress
+static AudLibrary g_vulkan;
+static float g_worldToView[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+static float g_viewToClip[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+void aud_set_camera(const float *worldToViewColumnMajor, const float *viewToClipColumnMajor)
+{
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column) {
+            g_worldToView[row * 4 + column] = worldToViewColumnMajor[column * 4 + row];
+            g_viewToClip[row * 4 + column] = viewToClipColumnMajor[column * 4 + row];
+        }
+}
+static int g_ownsDevice;
+static int g_rrAvailable, g_rr;
+#ifdef _WIN32
+static HMODULE g_openrrDll;
+static PFN_OnrRrGetApi g_openrrGetApi;
+static OnrRrApi5 g_openrrApi;
+static void *g_openrrContext;
+static int g_openrrMode, g_openrrReady;
+static uint32_t g_openrrQueueFamily, g_openrrQueueIndex, g_openrrApiVersion;
+static wchar_t g_openrrDataDir[MAX_PATH], g_openrrDlssdPath[MAX_PATH];
+static unsigned g_openrrInfoFrame;
+#endif
+#endif // AU_OPENRR_ONLY
 
 // ----------------------------------------------------------------------------------------
 // GL interop entry points
