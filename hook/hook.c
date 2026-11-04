@@ -462,6 +462,31 @@ typedef struct {
     void *data;
 } UniformRec;
 
+#if AU_HAS_DLSS
+static float g_openrrViewMatrix[16], g_openrrProjectionMatrix[16];
+static int g_openrrHaveViewMatrix, g_openrrHaveProjectionMatrix;
+static void capture_openrr_matrix(UniformRec *uniform, GLsizei count, GLboolean transpose, const GLfloat *values)
+{
+    if (!uniform || count < 1 || !values) return;
+    float *target = NULL;
+    if (!strcmp(uniform->name, "ViewMatrix")) {
+        target = g_openrrViewMatrix;
+        g_openrrHaveViewMatrix = 1;
+    } else if (!strcmp(uniform->name, "ProjectionMatrix")) {
+        target = g_openrrProjectionMatrix;
+        g_openrrHaveProjectionMatrix = 1;
+    }
+    if (!target) return;
+    // Convert GL's column-major upload (or transpose=true upload) to the effective
+    // column-major matrix. aud_set_camera converts these to OpenRR's row-major layout.
+    for (int row = 0; row < 4; ++row)
+        for (int column = 0; column < 4; ++column)
+            target[column * 4 + row] = transpose ? values[row * 4 + column] : values[column * 4 + row];
+    if (g_openrrHaveViewMatrix && g_openrrHaveProjectionMatrix)
+        aud_set_camera(g_openrrViewMatrix, g_openrrProjectionMatrix);
+}
+#endif
+
 typedef struct { char *name; GLuint binding; } BlockRec;
 
 typedef struct {
@@ -845,7 +870,11 @@ static void APIENTRY hook_glUniform1iv(GLint loc, GLsizei n, const GLint *v) { U
 static void APIENTRY hook_glUniform1uiv(GLint loc, GLsizei n, const GLuint *v) { UPRE cache_uniform(u, U_1UIV, n, 0, v, n * sizeof(GLuint)); UPOST r_glUniform1uiv(real, n, v); }
 static void APIENTRY hook_glUniformMatrix2fv(GLint loc, GLsizei n, GLboolean t, const GLfloat *v) { UPRE cache_uniform(u, U_M2, n, t, v, n * 4 * sizeof(GLfloat)); UPOST r_glUniformMatrix2fv(real, n, t, v); }
 static void APIENTRY hook_glUniformMatrix3fv(GLint loc, GLsizei n, GLboolean t, const GLfloat *v) { UPRE cache_uniform(u, U_M3, n, t, v, n * 9 * sizeof(GLfloat)); UPOST r_glUniformMatrix3fv(real, n, t, v); }
-static void APIENTRY hook_glUniformMatrix4fv(GLint loc, GLsizei n, GLboolean t, const GLfloat *v) { UPRE cache_uniform(u, U_M4, n, t, v, n * 16 * sizeof(GLfloat)); UPOST r_glUniformMatrix4fv(real, n, t, v); }
+static void APIENTRY hook_glUniformMatrix4fv(GLint loc, GLsizei n, GLboolean t, const GLfloat *v) { UPRE cache_uniform(u, U_M4, n, t, v, n * 16 * sizeof(GLfloat));
+#if AU_HAS_DLSS
+    capture_openrr_matrix(u, n, t, v);
+#endif
+    UPOST r_glUniformMatrix4fv(real, n, t, v); }
 
 static void replay_uniform(UniformRec *u)
 {
