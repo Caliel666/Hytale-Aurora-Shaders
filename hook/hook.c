@@ -23,6 +23,10 @@
 #define AU_HAS_DLSS 0
 #endif
 static int g_dlssState; // 0 not tried, 1 ready, -1 unavailable
+static int g_setOpenRR;
+#if AU_HAS_DLSS
+void aud_set_camera(const float *worldToViewColumnMajor, const float *viewToClipColumnMajor);
+#endif
 
 #ifdef _WIN32
 #define AU_GL_EXPORT __declspec(dllexport)
@@ -343,6 +347,9 @@ static void expand(Str *out, const char *text, int depth)
                         if (g_dlssState < 0)
                             str_cstr(out, "\n#undef AU_DLSS\n#define AU_DLSS 0\n");
                     }
+#else
+                    if (!strcmp(name, "AU_Settings.glsl") && g_setOpenRR)
+                        str_cstr(out, "\n#undef AU_DLSS\n#define AU_DLSS 1\n");
 #endif
                     str_cstr(out, "\n// END ");
                     str_cstr(out, name);
@@ -1581,7 +1588,7 @@ static void gi_draw(GLenum mode, GLint first, GLsizei count)
     int useHistory = program->giTemporal;
     int rayReconstruction = 0;
 #if AU_HAS_DLSS
-    if (g_setDlssEnabled && g_setDlssMode == 2 && g_dlssState == 1 && g_dlssRR
+    if (g_setDlssEnabled && (g_setDlssMode == 2 || g_setDlssMode == 3) && g_dlssState == 1 && g_dlssRR
         && g_frame - g_dlssPresentedFrame <= 2) { useHistory = 0; rayReconstruction = 1; }
 #endif
     if (useHistory) gi_bind(1, 0, 1, 0, program->giLights);
@@ -2133,7 +2140,7 @@ static void framegen_shutdown(void)
 }
 static int framegen_prepare(int width, int height)
 {
-    if (!g_setFrameGen || g_temporalFrame != g_frame) return 0;
+    if (g_setOpenRR || !g_setFrameGen || g_temporalFrame != g_frame) return 0;
     HDC (WINAPI *currentDC)(void) = (HDC (WINAPI *)(void))GetProcAddress(g_real, "wglGetCurrentDC");
     HWND window = currentDC ? WindowFromDC(currentDC()) : NULL;
     if (g_framegenState == 0) {
@@ -2206,7 +2213,7 @@ static void dlss_draw(GLenum mode, GLint first, GLsizei count)
     GLint inputViewport[4];
     r_glGetIntegerv(GL_VIEWPORT, inputViewport);
     int framegen = framegen_prepare(inputViewport[2], inputViewport[3]);
-    if (!g_setDlssEnabled) {
+    if (!g_setDlssEnabled && !g_setOpenRR) {
         ProgRec *program = prog_rec(g_curProg, 0);
         if (!r_glBindImageTexture) r_glBindImageTexture = (PFN_glBindImageTexture)dlss_getproc("glBindImageTexture");
         if (!r_glMemoryBarrier) r_glMemoryBarrier = (PFN_glMemoryBarrier)dlss_getproc("glMemoryBarrier");
@@ -2224,7 +2231,7 @@ static void dlss_draw(GLenum mode, GLint first, GLsizei count)
         return;
     }
 #endif
-    if (!g_setDlssEnabled || !dlss_ready()) {
+    if ((!g_setDlssEnabled && !g_setOpenRR) || !dlss_ready()) {
         ProgRec *pp = prog_rec(g_curProg, 0);
         if (pp && pp->locDlssActive >= 0) r_glUniform1i(pp->locDlssActive, 0);
         r_glDrawArrays(mode, first, count);
@@ -2242,7 +2249,7 @@ static void dlss_draw(GLenum mode, GLint first, GLsizei count)
         g_presentH = vp[3];
         render_physical_size(&g_presentW, &g_presentH);
     }
-    int rrRequested = g_setDlssMode == 2;
+    int rrRequested = g_setDlssMode == 2 || g_setDlssMode == 3;
     int rr = rrRequested && aud_rr_available();
     static int lastRRRequest = -1;
     if (lastRRRequest != rrRequested) {
@@ -2821,11 +2828,13 @@ static void settings_load(void)
     g_setDlssDebug = settings_num(txt, "AU_DLSS_DEBUG", 0);
     int voxelGI = settings_num(txt, "AU_PATH_TRACING", 0) > 0.5 && settings_num(txt, "AU_PRESET", 2) >= 2;
     int modeDenoising = settings_num(txt, voxelGI ? "AU_PT_DENOISE" : "AU_SSGI_DENOISE", 1) > 0.5;
-    g_setDlssMode = settings_num(txt, "AU_GI_DENOISER", 1) == 2 && modeDenoising ? 2 : 1;
+    int denoiser = (int)settings_num(txt, "AU_GI_DENOISER", 1);
+    g_setDlssMode = modeDenoising && (denoiser == 2 || denoiser == 3) ? denoiser : 1;
+    g_setOpenRR = g_setDlssMode == 3;
     g_setDlssPreset = settings_num(txt, "AU_DLSS_PRESET", 0);
     g_setDlssRRPreset = settings_num(txt, "AU_DLSS_RR_PRESET", g_setDlssPreset);
     g_setDlssSharpness = fmin(1.0, fmax(0.0, settings_num(txt, "AU_DLSS_SHARPNESS", 0.2)));
-    g_setDlssEnabled = settings_num(txt, "AU_DLSS", 0) > 0.5;
+    g_setDlssEnabled = settings_num(txt, "AU_DLSS", 0) > 0.5 || g_setOpenRR;
     int previousFrameGen = g_setFrameGen;
     g_setFrameGen = (int)settings_num(txt, "AU_DLSS_FRAMEGEN", 0);
     if (g_setFrameGen < 0 || g_setFrameGen > 5) g_setFrameGen = 0;
