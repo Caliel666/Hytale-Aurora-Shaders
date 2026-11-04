@@ -62,20 +62,23 @@ $openrrSha256 = '6c85ce54087836fe2d8e88e6b1e8b037ca1c432164fd28e4da3652b4bae833e
 $openrrDir = Join-Path $root 'tools\openrr'
 $openrrZip = Join-Path $root 'tools\openrr-0.1.0.zip'
 $openrrUrl = "https://github.com/OpenNeuralRendering/OpenRR/releases/download/v$openrrVersion/openrr-$openrrVersion.zip"
-if (-not (Test-Path (Join-Path $openrrDir 'OpenNrRrRuntime.dll'))) {
-    New-Item -ItemType Directory -Force $openrrDir | Out-Null
-    if (-not (Test-Path $openrrZip)) {
-        Write-Host "Downloading OpenRR $openrrVersion runtime..."
-        Invoke-WebRequest $openrrUrl -OutFile $openrrZip -UseBasicParsing
-    }
-    $actualHash = (Get-FileHash $openrrZip -Algorithm SHA256).Hash.ToLower()
-    if ($actualHash -ne $openrrSha256) { throw "OpenRR archive checksum mismatch (got $actualHash)." }
+New-Item -ItemType Directory -Force $openrrDir | Out-Null
+if (-not (Test-Path $openrrZip)) {
+    Write-Host "Downloading OpenRR $openrrVersion runtime..."
+    Invoke-WebRequest $openrrUrl -OutFile $openrrZip -UseBasicParsing
+}
+$actualHash = (Get-FileHash $openrrZip -Algorithm SHA256).Hash.ToLower()
+if ($actualHash -ne $openrrSha256) { throw "OpenRR archive checksum mismatch (got $actualHash)." }
+
+# The upstream 0.1.0 ZIP uses a directory named "opennr-rr.shaders" (not
+# "opennr-rr\\shaders"). Re-extract if either required payload is missing.
+$runtime = Get-ChildItem $openrrDir -File -Filter 'OpenNrRrRuntime.dll' -Recurse | Select-Object -First 1
+$shaderRoot = Get-ChildItem $openrrDir -Directory -Recurse | Where-Object { $_.Name -eq 'opennr-rr.shaders' } | Select-Object -First 1
+if (-not $runtime -or -not $shaderRoot) {
     Expand-Archive -Path $openrrZip -DestinationPath $openrrDir -Force
 }
-# Release archive layout: OpenNrRrRuntime.dll at the root and opennr-rr\\shaders\\*.spv.
-# Validate the actual payload rather than assuming the shader folder is a direct child.
 $runtime = Get-ChildItem $openrrDir -File -Filter 'OpenNrRrRuntime.dll' -Recurse | Select-Object -First 1
-$shaderRoot = Get-ChildItem $openrrDir -Directory -Filter 'shaders' -Recurse | Select-Object -First 1
+$shaderRoot = Get-ChildItem $openrrDir -Directory -Recurse | Where-Object { $_.Name -eq 'opennr-rr.shaders' } | Select-Object -First 1
 $shaderFiles = @()
 if ($shaderRoot) { $shaderFiles = @(Get-ChildItem $shaderRoot.FullName -File -Recurse -Filter '*.spv') }
 if (-not $runtime) { throw "OpenRR $openrrVersion archive is missing OpenNrRrRuntime.dll. Archive contents: $((Get-ChildItem $openrrDir -Recurse | ForEach-Object FullName) -join '; ')" }
