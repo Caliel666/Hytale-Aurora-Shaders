@@ -909,8 +909,11 @@ int aud_configure(int renderW, int renderH, int outW, int outH, int quality, int
         release_feature();
         return 0;
     }
-    LOG("dlss: %s created %dx%d -> %dx%d (quality %d, preset %d%s)", g_rr ? "ray reconstruction" : "super resolution",
+    LOG("dlss: NVIDIA NGX %s created %dx%d -> %dx%d (quality %d, preset %d%s)",
+        g_rr ? "Ray Reconstruction" : "Super Resolution",
         renderW, renderH, outW, outH, quality, preset, hdr ? ", HDR" : "");
+    if (g_rr)
+        LOG("openrr: NOT in use; this frame is processed by NVIDIA NGX Ray Reconstruction");
     return 1;
 }
 
