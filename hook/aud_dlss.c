@@ -1015,6 +1015,7 @@ int aud_openrr_init(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *runtime
 {
     g_log = log;
     g_openrrMode = 1;
+    g_ownsDevice = 1;
     if (!runtimeDir || !dataDir || !dlssdPath || !openrr_init_gl(glGetProc)) return 0;
     if (wcslen(dataDir) >= MAX_PATH || wcslen(dlssdPath) >= MAX_PATH) {
         LOG("openrr: asset path exceeds MAX_PATH");
@@ -1028,7 +1029,7 @@ int aud_openrr_init(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *runtime
     }
     if (!g_openrrDll) {
         wchar_t runtimePath[MAX_PATH];
-        int length = _snwprintf(runtimePath, MAX_PATH, L"%ls\\\\OpenNrRrRuntime.dll", runtimeDir);
+        int length = _snwprintf(runtimePath, MAX_PATH, L"%ls\\OpenNrRrRuntime.dll", runtimeDir);
         if (length <= 0 || length >= MAX_PATH) {
             LOG("openrr: runtime path is invalid");
             return 0;
