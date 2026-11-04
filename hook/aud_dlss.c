@@ -26,9 +26,11 @@
 #include <wchar.h>
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
+#ifndef AU_OPENRR_ONLY
 #include "nvsdk_ngx_defs.h"
 #include "nvsdk_ngx_defs_vk.h"
 #include "nvsdk_ngx_defs_dlssd.h"
+#endif
 #include "aud_dlss.h"
 #ifdef _WIN32
 #include "opennr_rr_api.h"
