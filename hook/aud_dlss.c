@@ -161,7 +161,7 @@ static OnrRrApi5 g_openrrApi;
 static void *g_openrrContext;
 static int g_openrrMode, g_openrrReady;
 static uint32_t g_openrrQueueFamily, g_openrrQueueIndex, g_openrrApiVersion;
-static wchar_t g_openrrDataDir[MAX_PATH], g_openrrDlssdPath[MAX_PATH];
+static wchar_t g_openrrDataDir[MAX_PATH], g_openrrDlssdPath[MAX_PATH], g_openrrLogPath[MAX_PATH];
 static unsigned g_openrrInfoFrame;
 #endif
 
@@ -188,7 +188,7 @@ static OnrRrApi5 g_openrrApi;
 static void *g_openrrContext;
 static int g_openrrMode, g_openrrReady;
 static uint32_t g_openrrQueueFamily, g_openrrQueueIndex, g_openrrApiVersion;
-static wchar_t g_openrrDataDir[MAX_PATH], g_openrrDlssdPath[MAX_PATH];
+static wchar_t g_openrrDataDir[MAX_PATH], g_openrrDlssdPath[MAX_PATH], g_openrrLogPath[MAX_PATH];
 static unsigned g_openrrInfoFrame;
 #endif
 #endif // AU_OPENRR_ONLY
@@ -334,6 +334,9 @@ static void destroy_image(AudImage *im)
 
 static int create_image(AudImage *im, unsigned w, unsigned h, VkFormat vkFmt, GLenum glFmt)
 {
+#ifdef _WIN32
+    if (g_openrrMode) LOG("openrr: creating shared image %ux%u VkFormat=%u GLFormat=0x%x", w, h, (unsigned)vkFmt, glFmt);
+#endif
     VkExternalMemoryImageCreateInfo ext = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
     ext.handleTypes = AUD_MEMORY_HANDLE;
     VkImageCreateInfo ici = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, &ext};
@@ -350,7 +353,11 @@ static int create_image(AudImage *im, unsigned w, unsigned h, VkFormat vkFmt, GL
                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (vkCreateImage_(g_dev, &ici, NULL, &im->image) != VK_SUCCESS) { LOG("dlss: vkCreateImage failed"); return 0; }
+    VkResult createResult = vkCreateImage_(g_dev, &ici, NULL, &im->image);
+    if (createResult != VK_SUCCESS) { LOG("dlss: vkCreateImage failed (%d)", (int)createResult); return 0; }
+#ifdef _WIN32
+    if (g_openrrMode) LOG("openrr: VkImage created");
+#endif
 
     VkMemoryRequirements req;
     vkGetImageMemoryRequirements_(g_dev, im->image, &req);
@@ -361,10 +368,18 @@ static int create_image(AudImage *im, unsigned w, unsigned h, VkFormat vkFmt, GL
     VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, &exp};
     mai.allocationSize = req.size;
     mai.memoryTypeIndex = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (mai.memoryTypeIndex == UINT32_MAX || vkAllocateMemory_(g_dev, &mai, NULL, &im->memory) != VK_SUCCESS) {
-        LOG("dlss: vkAllocateMemory failed");
+    if (mai.memoryTypeIndex == UINT32_MAX) {
+        LOG("dlss: no compatible device-local memory type for shared image (bits=0x%x)", req.memoryTypeBits);
         return 0;
     }
+    VkResult allocResult = vkAllocateMemory_(g_dev, &mai, NULL, &im->memory);
+    if (allocResult != VK_SUCCESS) {
+        LOG("dlss: vkAllocateMemory failed (%d)", (int)allocResult);
+        return 0;
+    }
+#ifdef _WIN32
+    if (g_openrrMode) LOG("openrr: image memory allocated (%llu bytes)", (unsigned long long)req.size);
+#endif
     if (!vk_ok(vkBindImageMemory_(g_dev, im->image, im->memory, 0), "bind shared image memory")) return 0;
 
     VkImageViewCreateInfo vci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
@@ -399,12 +414,16 @@ static int create_image(AudImage *im, unsigned w, unsigned h, VkFormat vkFmt, GL
 #ifdef _WIN32
     gl.ImportMemoryHandle(im->glMem, req.size, GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
     CloseHandle(handle);
+    if (g_openrrMode) LOG("openrr: GL memory object imported");
 #else
     // A successful GL import consumes the fd; on failure it remains ours.
     gl.ImportMemoryHandle(im->glMem, req.size, GL_HANDLE_TYPE_OPAQUE_FD_EXT, handle);
     if (!gl_ok("shared image fd import")) { close(handle); return 0; }
 #endif
     if (!gl_ok("shared image import") || !im->glMem) return 0;
+#ifdef _WIN32
+    if (g_openrrMode) LOG("openrr: GL memory import validated");
+#endif
     GLint prev = 0;
     gl.GetIntegerv(GL_TEXTURE_BINDING_2D, &prev);
     gl.GenTextures(1, &im->glTex);
@@ -422,6 +441,9 @@ static int create_image(AudImage *im, unsigned w, unsigned h, VkFormat vkFmt, GL
         LOG("dlss: invalid shared texture %u: requested %ux%u format 0x%x, got %dx%d", im->glTex, w, h, glFmt, actualWidth, actualHeight);
         return 0;
     }
+#ifdef _WIN32
+    if (g_openrrMode) LOG("openrr: GL shared texture storage ready");
+#endif
 
     im->format = vkFmt;
     im->w = w;
@@ -1061,6 +1083,15 @@ int aud_openrr_init(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *runtime
     }
     wcscpy(g_openrrDataDir, dataDir);
     wcscpy(g_openrrDlssdPath, dlssdPath);
+    CreateDirectoryW(g_openrrDataDir, NULL);
+    int logLength = _snwprintf(g_openrrLogPath, MAX_PATH, L"%ls\\openrr_runtime.log", g_openrrDataDir);
+    if (logLength <= 0 || logLength >= MAX_PATH) {
+        g_openrrLogPath[0] = 0;
+        LOG("openrr: runtime log path exceeds MAX_PATH; using runtime default");
+    } else {
+        g_openrrLogPath[MAX_PATH - 1] = 0;
+        LOG("openrr: runtime log path %ls", g_openrrLogPath);
+    }
     if (GetFileAttributesW(g_openrrDlssdPath) == INVALID_FILE_ATTRIBUTES) {
         LOG("openrr: nvngx_dlssd.dll 310.9.1 is missing at %ls", g_openrrDlssdPath);
         return 0;
@@ -1147,8 +1178,12 @@ static int openrr_create_context(int renderW, int renderH, int outW, int outH)
     info.output_height = (uint32_t)outH;
     info.dlssd_path = g_openrrDlssdPath;
     info.data_dir = g_openrrDataDir;
+    info.log_path = g_openrrLogPath[0] ? g_openrrLogPath : NULL;
     info.vk_device = &device;
+    LOG("openrr: calling runtime Create for %dx%d -> %dx%d (queue %u:%u)",
+        renderW, renderH, outW, outH, g_openrrQueueFamily, g_openrrQueueIndex);
     int32_t status = g_openrrApi.v4.v3.v2.v1.Create(&info, &g_openrrContext);
+    LOG("openrr: runtime Create returned status=%d context=%p", status, g_openrrContext);
     if (status != ONR_RR_OK || !g_openrrContext) {
         char error[512] = {0};
         openrr_last_error(error, sizeof(error));
@@ -1158,6 +1193,14 @@ static int openrr_create_context(int renderW, int renderH, int outW, int outH)
     }
     LOG("openrr: runtime context created for %dx%d -> %dx%d; building weights from the pinned 310.9.1 DLL",
         renderW, renderH, outW, outH);
+    if (g_openrrApi.v4.v3.v2.v1.GetInfo) {
+        OnrRrInfo runtimeInfo;
+        memset(&runtimeInfo, 0, sizeof(runtimeInfo));
+        runtimeInfo.size = sizeof(runtimeInfo);
+        if (g_openrrApi.v4.v3.v2.v1.GetInfo(g_openrrContext, &runtimeInfo) == ONR_RR_OK)
+            LOG("openrr: initial runtime state=%u frames=%u backend=%u; %s",
+                runtimeInfo.state, runtimeInfo.frames, runtimeInfo.backend, runtimeInfo.message);
+    }
     return 1;
 }
 
@@ -1183,6 +1226,8 @@ static void openrr_set_frame_texture(OnrRrTexture *texture, OnrRrVkImage *view, 
 static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, float mvScaleY, int reset)
 {
     if (!g_openrrContext || g_bridgeFailed) return 0;
+    unsigned frameNumber = ++g_openrrInfoFrame;
+    if (frameNumber <= 4) LOG("openrr: frame %u begin", frameNumber);
     VkCommandBuffer cb = begin_cmd();
     if (!cb) return 0;
     GLuint textures[AUD_TEX_COUNT];
@@ -1220,7 +1265,9 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
     openrr_set_frame_texture(&frame.motion, &images[AUD_TEX_MOTION], AUD_TEX_MOTION);
     openrr_set_frame_texture(&frame.output, &images[AUD_TEX_OUTPUT], AUD_TEX_OUTPUT);
 
+    if (frameNumber <= 4) LOG("openrr: frame %u RecordVk begin", frameNumber);
     int32_t status = g_openrrApi.RecordVk(g_openrrContext, &frame, cb);
+    if (frameNumber <= 4) LOG("openrr: frame %u RecordVk returned status=%d", frameNumber, status);
     barrier_all(cb, 0);
     if (!vk_ok(vkEndCommandBuffer_(cb), "end OpenRR frame commands")) return 0;
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -1232,10 +1279,13 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
     submit.pCommandBuffers = &cb;
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &g_semVKDone;
+    if (frameNumber <= 4) LOG("openrr: frame %u submitting Vulkan command buffer", frameNumber);
     if (!vk_ok(vkQueueSubmit_(g_queue, 1, &submit, g_fence[g_frameIdx]), "submit OpenRR frame"))
         return 0;
     g_frameIdx = (g_frameIdx + 1) % AUD_FRAMES;
+    if (frameNumber <= 4) LOG("openrr: frame %u Vulkan submit succeeded; waiting for GL", frameNumber);
     gl.WaitSemaphore(g_glSemVKDone, 0, NULL, textureCount, textures, layouts);
+    if (frameNumber <= 4) LOG("openrr: frame %u GL hand-off returned", frameNumber);
     if (!gl_ok("OpenRR GL/Vulkan hand-off")) return 0;
     if (status != ONR_RR_OK) {
         char error[512] = {0};
@@ -1243,7 +1293,7 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
         LOG("openrr: RecordVk failed: %s", error[0] ? error : "unknown runtime error");
         return 0;
     }
-    if ((++g_openrrInfoFrame % 300) == 1 && g_openrrApi.v4.v3.v2.v1.GetInfo) {
+    if ((frameNumber % 300) == 1 && g_openrrApi.v4.v3.v2.v1.GetInfo) {
         OnrRrInfo info;
         memset(&info, 0, sizeof(info));
         info.size = sizeof(info);
@@ -1287,8 +1337,13 @@ static void barrier_all(VkCommandBuffer cb, int acquire)
         VkImageMemoryBarrier *m = &b[n++];
         memset(m, 0, sizeof(*m));
         m->sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        m->srcAccessMask = acquire ? 0 : VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
-        m->dstAccessMask = acquire ? VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT : 0;
+        // ABI 5's RecordVk uses transfer operations for every guide and the output, then
+        // restores the layouts supplied by the host. Include transfer access in both sides
+        // of the external ownership hand-off; shader-only masks leave those accesses unsynchronized.
+        const VkAccessFlags bridgeAccess = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                                           VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        m->srcAccessMask = acquire ? 0 : bridgeAccess;
+        m->dstAccessMask = acquire ? bridgeAccess : 0;
         m->oldLayout = VK_IMAGE_LAYOUT_GENERAL;
         m->newLayout = VK_IMAGE_LAYOUT_GENERAL;
         m->srcQueueFamilyIndex = acquire ? VK_QUEUE_FAMILY_EXTERNAL : g_qfam;
@@ -1328,6 +1383,7 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
 {
     if (!g_openrrReady || g_bridgeFailed || renderW <= 0 || renderH <= 0 || outW <= 0 || outH <= 0)
         return 0;
+    LOG("openrr: configuring frame bridge %dx%d -> %dx%d", renderW, renderH, outW, outH);
     release_feature();
     g_rr = 1;
     g_renderW = renderW; g_renderH = renderH;
@@ -1345,6 +1401,7 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
         return 0;
     }
 
+    LOG("openrr: all shared guide images created; initializing Vulkan ownership");
     VkCommandBuffer cb = begin_cmd();
     if (!cb) { release_feature(); return 0; }
     VkImageMemoryBarrier barriers[AUD_TEX_COUNT];
@@ -1391,6 +1448,7 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
         release_feature(); return 0;
     }
     g_frameIdx = (g_frameIdx + 1) % AUD_FRAMES;
+    LOG("openrr: shared images initialized; creating runtime context");
     if (!openrr_create_context(renderW, renderH, outW, outH)) {
         release_feature();
         return 0;
@@ -1648,7 +1706,7 @@ void aud_shutdown(void)
     g_openrrMode = g_openrrReady = 0;
     g_openrrQueueFamily = g_openrrQueueIndex = g_openrrApiVersion = 0;
     g_openrrInfoFrame = 0;
-    g_openrrDataDir[0] = g_openrrDlssdPath[0] = 0;
+    g_openrrDataDir[0] = g_openrrDlssdPath[0] = g_openrrLogPath[0] = 0;
     memset(&g_openrrApi, 0, sizeof(g_openrrApi));
 #endif
 }
