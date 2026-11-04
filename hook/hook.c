@@ -2242,7 +2242,18 @@ static void dlss_draw(GLenum mode, GLint first, GLsizei count)
         g_presentH = vp[3];
         render_physical_size(&g_presentW, &g_presentH);
     }
-    int rr = g_setDlssMode == 2 && aud_rr_available();
+    int rrRequested = g_setDlssMode == 2;
+    int rr = rrRequested && aud_rr_available();
+    static int lastRRRequest = -1;
+    if (lastRRRequest != rrRequested) {
+        lastRRRequest = rrRequested;
+        if (!rrRequested)
+            logf_("dlss: Super Resolution selected; Ray Reconstruction not requested");
+        else if (!rr)
+            logf_("dlss: Ray Reconstruction requested, but NVIDIA NGX reports it unavailable; falling back to Super Resolution");
+        else
+            logf_("dlss: NVIDIA NGX Ray Reconstruction selected; OpenRR is not the active backend");
+    }
     int renderWidth = vp[2], renderHeight = vp[3];
     if (renderWidth < 32) renderWidth = 32;
     if (renderHeight < 32) renderHeight = 32;
