@@ -1469,10 +1469,10 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
     VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cb;
-    submit.signalSemaphoreCount = 1;
-    submit.pSignalSemaphores = &g_semVKDone;
-    LOG("openrr: submitting initial image ownership transition (queue=%p, semaphore=%p, fence=%p)",
-        (void *)g_queue, (void *)g_semVKDone, (void *)g_fence[g_frameIdx]);
+    submit.signalSemaphoreCount = AUD_TEX_COUNT;
+    submit.pSignalSemaphores = g_openrrSemVKDone;
+    LOG("openrr: submitting initial image ownership transition (queue=%p, %d per-image semaphores, fence=%p)",
+        (void *)g_queue, AUD_TEX_COUNT, (void *)g_fence[g_frameIdx]);
     if (!vk_ok(vkQueueSubmit_(g_queue, 1, &submit, g_fence[g_frameIdx]), "submit OpenRR image initialization")) {
         release_feature(); return 0;
     }
@@ -1480,16 +1480,14 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
     if (!vk_ok(vkQueueWaitIdle_(g_queue), "wait for OpenRR image initialization")) {
         release_feature(); return 0;
     }
-    GLuint textures[AUD_TEX_COUNT];
-    GLenum layouts[AUD_TEX_COUNT];
-    GLuint textureCount = 0;
-    for (int i = 0; i < AUD_TEX_COUNT; ++i) if (g_img[i].glTex) {
-        textures[textureCount] = g_img[i].glTex;
-        layouts[textureCount++] = GL_LAYOUT_GENERAL_EXT;
+    LOG("openrr: initial Vulkan queue idle; acquiring shared textures individually in OpenGL");
+    for (int i = 0; i < AUD_TEX_COUNT; ++i) {
+        if (!g_img[i].glTex) continue;
+        GLenum layout = GL_LAYOUT_GENERAL_EXT;
+        LOG("openrr: waiting for initial image %d semaphore", i);
+        gl.WaitSemaphore(g_openrrGlSemVKDone[i], 0, NULL, 1, &g_img[i].glTex, &layout);
+        LOG("openrr: initial image %d acquired by OpenGL", i);
     }
-    LOG("openrr: initial Vulkan queue idle; acquiring %u shared textures in OpenGL", textureCount);
-    gl.WaitSemaphore(g_glSemVKDone, 0, NULL, textureCount, textures, layouts);
-    LOG("openrr: initial OpenGL semaphore wait returned");
     if (!gl_ok("OpenRR initial shared image acquisition")) {
         release_feature(); return 0;
     }
