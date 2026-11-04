@@ -1312,12 +1312,34 @@ static VkCommandBuffer begin_cmd(void)
 {
     if (g_bridgeFailed) return VK_NULL_HANDLE;
     VkCommandBuffer cb = g_cmd[g_frameIdx];
-    if (!vk_ok(vkWaitForFences_(g_dev, 1, &g_fence[g_frameIdx], VK_TRUE, UINT64_MAX), "wait for DLSS command buffer") ||
-        !vk_ok(vkResetFences_(g_dev, 1, &g_fence[g_frameIdx]), "reset DLSS fence") ||
-        !vk_ok(vkResetCommandBuffer_(cb, 0), "reset DLSS command buffer")) return VK_NULL_HANDLE;
+#ifdef _WIN32
+    if (g_openrrMode) LOG("openrr: begin_cmd slot=%d cmd=%p fence=%p queue=%p",
+                          g_frameIdx, (void *)cb, (void *)g_fence[g_frameIdx], (void *)g_queue);
+    if (!vkWaitForFences_ || !vkResetFences_ || !vkResetCommandBuffer_ || !vkBeginCommandBuffer_) {
+        LOG("openrr: required command-buffer entry point is null");
+        g_bridgeFailed = 1;
+        return VK_NULL_HANDLE;
+    }
+    if (g_openrrMode) LOG("openrr: waiting for command-buffer fence");
+#endif
+    if (!vk_ok(vkWaitForFences_(g_dev, 1, &g_fence[g_frameIdx], VK_TRUE, UINT64_MAX), "wait for DLSS command buffer")) return VK_NULL_HANDLE;
+#ifdef _WIN32
+    if (g_openrrMode) LOG("openrr: fence signaled; resetting fence");
+#endif
+    if (!vk_ok(vkResetFences_(g_dev, 1, &g_fence[g_frameIdx]), "reset DLSS fence")) return VK_NULL_HANDLE;
+#ifdef _WIN32
+    if (g_openrrMode) LOG("openrr: fence reset; resetting command buffer");
+#endif
+    if (!vk_ok(vkResetCommandBuffer_(cb, 0), "reset DLSS command buffer")) return VK_NULL_HANDLE;
     VkCommandBufferBeginInfo bi = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+#ifdef _WIN32
+    if (g_openrrMode) LOG("openrr: command buffer reset; beginning recording");
+#endif
     if (!vk_ok(vkBeginCommandBuffer_(cb, &bi), "begin DLSS command buffer")) return VK_NULL_HANDLE;
+#ifdef _WIN32
+    if (g_openrrMode) LOG("openrr: command buffer recording started");
+#endif
     return cb;
 }
 
