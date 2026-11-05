@@ -1380,8 +1380,20 @@ static void barrier_all(VkCommandBuffer cb, int acquire)
         m->dstAccessMask = acquire ? bridgeAccess : 0;
         m->oldLayout = VK_IMAGE_LAYOUT_GENERAL;
         m->newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        m->srcQueueFamilyIndex = acquire ? VK_QUEUE_FAMILY_EXTERNAL : g_qfam;
-        m->dstQueueFamilyIndex = acquire ? g_qfam : VK_QUEUE_FAMILY_EXTERNAL;
+#ifdef _WIN32
+        if (g_openrrMode) {
+            // OpenGL's EXT_semaphore wait/signal is the inter-API ownership and execution
+            // hand-off used by the Khronos OpenGL/Vulkan interop sample. Do not also transfer
+            // the image to VK_QUEUE_FAMILY_EXTERNAL here: on OpenRR that double-applies the
+            // ownership hand-off before glWaitSemaphoreEXT can acquire the shared texture.
+            m->srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            m->dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        } else
+#endif
+        {
+            m->srcQueueFamilyIndex = acquire ? VK_QUEUE_FAMILY_EXTERNAL : g_qfam;
+            m->dstQueueFamilyIndex = acquire ? g_qfam : VK_QUEUE_FAMILY_EXTERNAL;
+        }
         m->image = g_img[i].image;
         m->subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         m->subresourceRange.levelCount = 1;
