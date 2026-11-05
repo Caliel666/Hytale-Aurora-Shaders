@@ -54,7 +54,7 @@ static PFN_vkGetInstanceProcAddr vkGetInstanceProcAddr_;
 #endif
 #define VK_FUNCS(X) \
     X(vkCreateInstance) X(vkEnumerateInstanceExtensionProperties) X(vkDestroyInstance) \
-    X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceQueueFamilyProperties) \
+    X(vkEnumeratePhysicalDevices) X(vkGetPhysicalDeviceProperties2) X(vkGetPhysicalDeviceExternalSemaphoreProperties) X(vkGetPhysicalDeviceQueueFamilyProperties) \
     X(vkGetPhysicalDeviceMemoryProperties) X(vkGetPhysicalDeviceFeatures2) X(vkEnumerateDeviceExtensionProperties) \
     X(vkCreateDevice) X(vkGetDeviceProcAddr) X(vkDestroyDevice) X(vkGetDeviceQueue) X(vkDeviceWaitIdle) \
     X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers) X(vkBeginCommandBuffer) X(vkEndCommandBuffer) \
@@ -215,6 +215,7 @@ typedef unsigned long long GLuint64;
 #define GL_RG16F 0x822F
 #define GL_RGBA8 0x8058
 #define GL_HANDLE_TYPE_OPAQUE_WIN32_EXT 0x9587
+#define GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT 0x9588
 #define GL_DEDICATED_MEMORY_OBJECT_EXT 0x9581
 #define GL_LAYOUT_GENERAL_EXT 0x958D
 #define GL_NUM_DEVICE_UUIDS_EXT 0x9596
@@ -297,6 +298,8 @@ static GLuint g_glSemGLDone, g_glSemVKDone;
 // Per-image binary semaphores keep GL_EXT_semaphore barrier lists to one texture each.
 static VkSemaphore g_openrrSemGLDone[AUD_TEX_COUNT], g_openrrSemVKDone[AUD_TEX_COUNT];
 static GLuint g_openrrGlSemGLDone[AUD_TEX_COUNT], g_openrrGlSemVKDone[AUD_TEX_COUNT];
+static VkExternalSemaphoreHandleTypeFlagBits g_openrrSemaphoreHandleType;
+static unsigned g_openrrGlSemaphoreHandleType;
 #endif
 static int g_renderW, g_renderH, g_outW, g_outH;
 
@@ -470,13 +473,27 @@ static int create_image(AudImage *im, unsigned w, unsigned h, VkFormat vkFmt, GL
 static int create_semaphore(VkSemaphore *vk, GLuint *glSem)
 {
     VkExportSemaphoreCreateInfo exp = {VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO};
+#ifdef _WIN32
+    VkExternalSemaphoreHandleTypeFlagBits handleType = AUD_SEMAPHORE_HANDLE;
+    GLenum glHandleType = GL_HANDLE_TYPE_OPAQUE_WIN32_EXT;
+    if (g_openrrMode) {
+        handleType = g_openrrSemaphoreHandleType;
+        glHandleType = g_openrrGlSemaphoreHandleType;
+        if (!handleType || !glHandleType) {
+            LOG("openrr: refusing to create a semaphore without a compatible Vulkan/GL handle type");
+            return 0;
+        }
+    }
+    exp.handleTypes = handleType;
+#else
     exp.handleTypes = AUD_SEMAPHORE_HANDLE;
+#endif
     VkSemaphoreCreateInfo sci = {VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &exp};
     if (vkCreateSemaphore_(g_dev, &sci, NULL, vk) != VK_SUCCESS) return 0;
 #ifdef _WIN32
     VkSemaphoreGetWin32HandleInfoKHR hi = {VK_STRUCTURE_TYPE_SEMAPHORE_GET_WIN32_HANDLE_INFO_KHR};
     hi.semaphore = *vk;
-    hi.handleType = AUD_SEMAPHORE_HANDLE;
+    hi.handleType = handleType;
     HANDLE handle = NULL;
     if (vkGetSemaphoreWin32HandleKHR_(g_dev, &hi, &handle) != VK_SUCCESS || !handle) return 0;
 #else
@@ -489,8 +506,10 @@ static int create_semaphore(VkSemaphore *vk, GLuint *glSem)
     gl_ok("before shared semaphore import");
     gl.GenSemaphores(1, glSem);
 #ifdef _WIN32
-    gl.ImportSemaphoreHandle(*glSem, GL_HANDLE_TYPE_OPAQUE_WIN32_EXT, handle);
-    CloseHandle(handle);
+    gl.ImportSemaphoreHandle(*glSem, glHandleType, handle);
+    // OPAQUE_WIN32 is an NT handle and must be closed by its exporter after import.
+    // KMT handles are global kernel handles, not NT handles; CloseHandle is not valid for them.
+    if (handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT) CloseHandle(handle);
 #else
     gl.ImportSemaphoreHandle(*glSem, GL_HANDLE_TYPE_OPAQUE_FD_EXT, handle);
     if (!gl_ok("shared semaphore fd import")) { close(handle); return 0; }
@@ -882,6 +901,42 @@ static int openrr_has_extension(const VkExtensionProperties *extensions, uint32_
     return 0;
 }
 
+static int openrr_select_semaphore_handle_type(void)
+{
+    const VkExternalSemaphoreHandleTypeFlagBits candidates[] = {
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT,
+        VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_KMT_BIT
+    };
+    for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); ++i) {
+        VkPhysicalDeviceExternalSemaphoreInfo query = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO
+        };
+        query.handleType = candidates[i];
+        VkExternalSemaphoreProperties properties = {
+            VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES
+        };
+        vkGetPhysicalDeviceExternalSemaphoreProperties_(g_phys, &query, &properties);
+        LOG("openrr: semaphore handle 0x%x features=0x%x compatible=0x%x export-from-imported=0x%x",
+            (unsigned)candidates[i], (unsigned)properties.externalSemaphoreFeatures,
+            (unsigned)properties.compatibleHandleTypes,
+            (unsigned)properties.exportFromImportedHandleTypes);
+        if (!(properties.compatibleHandleTypes & candidates[i]) ||
+            !(properties.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT))
+            continue;
+        g_openrrSemaphoreHandleType = candidates[i];
+        g_openrrGlSemaphoreHandleType =
+            candidates[i] == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT
+                ? GL_HANDLE_TYPE_OPAQUE_WIN32_EXT
+                : GL_HANDLE_TYPE_OPAQUE_WIN32_KMT_EXT;
+        LOG("openrr: selected %s for Vulkan/GL semaphore sharing",
+            candidates[i] == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32_BIT
+                ? "OPAQUE_WIN32" : "OPAQUE_WIN32_KMT");
+        return 1;
+    }
+    LOG("openrr: AMD Vulkan device exposes no compatible exportable Win32 semaphore handle type");
+    return 0;
+}
+
 static int openrr_prepare_device(void)
 {
     uint32_t count = 0;
@@ -1069,9 +1124,12 @@ static int openrr_prepare_device(void)
         if (!vk_ok(vkCreateFence_(g_dev, &fenceInfo, NULL, &g_fence[i]), "create OpenRR host fence"))
             return 0;
     }
+    // Select an external handle type supported by this exact Vulkan device before exporting
+    // any semaphore to OpenGL. Khronos' interop sample performs this capability query rather
+    // than assuming OPAQUE_WIN32 is universally compatible.
+    if (!openrr_select_semaphore_handle_type()) return 0;
     // One binary semaphore pair orders the complete shared-image set. This is the
-    // GL_EXT_semaphore pattern used by Khronos' OpenGL/Vulkan interop sample: one signal
-    // operation carries the texture barriers, rather than importing many semaphore objects.
+    // GL_EXT_semaphore pattern used by Khronos' OpenGL/Vulkan interop sample.
     if (!create_semaphore(&g_openrrSemGLDone[0], &g_openrrGlSemGLDone[0]) ||
         !create_semaphore(&g_openrrSemVKDone[0], &g_openrrGlSemVKDone[0])) {
         LOG("openrr: failed to create shared GL/Vulkan semaphore pair");
@@ -1148,9 +1206,9 @@ int aud_openrr_init(AudLogFn log, AudGetProcFn glGetProc, const wchar_t *runtime
 #define OPENRR_LOAD_I(n) n##_ = (PFN_##n)vkGetInstanceProcAddr_(g_inst, #n);
     VK_FUNCS(OPENRR_LOAD_I)
 #undef OPENRR_LOAD_I
-    if (!vkGetPhysicalDeviceProperties2_ || !vkGetPhysicalDeviceQueueFamilyProperties_ ||
-        !vkEnumeratePhysicalDevices_ || !vkGetPhysicalDeviceMemoryProperties_ ||
-        !vkEnumerateDeviceExtensionProperties_ || !vkCreateDevice_) {
+    if (!vkGetPhysicalDeviceProperties2_ || !vkGetPhysicalDeviceExternalSemaphoreProperties_ ||
+        !vkGetPhysicalDeviceQueueFamilyProperties_ || !vkEnumeratePhysicalDevices_ ||
+        !vkGetPhysicalDeviceMemoryProperties_ || !vkEnumerateDeviceExtensionProperties_ || !vkCreateDevice_) {
         LOG("openrr: required Vulkan instance entry points are missing");
         return 0;
     }
