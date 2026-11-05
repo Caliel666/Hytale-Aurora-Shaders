@@ -1241,12 +1241,12 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
     if (frameNumber <= 4) LOG("openrr: frame %u begin", frameNumber);
     VkCommandBuffer cb = begin_cmd();
     if (!cb) return 0;
-    // Diagnostic isolation: first complete GL work explicitly, then signal the imported
-    // semaphore without texture barriers. If this returns on AMD, the previous crash was
-    // in GL's external-texture barrier handling rather than the semaphore object itself.
-    if (frameNumber <= 4) LOG("openrr: frame %u finishing GL work before semaphore-only signal", frameNumber);
-    gl.Finish();
-    if (!gl_ok("OpenRR GL finish before signal")) {
+    // GL commands are ordered within this context. Flush them before queuing the external
+    // semaphore signal; glFinish is unnecessary here and can stall/crash in AMD's driver
+    // while external Vulkan memory is bound to the context.
+    if (frameNumber <= 4) LOG("openrr: frame %u flushing GL work before semaphore-only signal", frameNumber);
+    gl.Flush();
+    if (!gl_ok("OpenRR GL flush before signal")) {
         g_bridgeFailed = 1;
         return 0;
     }
@@ -1254,6 +1254,8 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
         LOG("openrr: frame %u signaling semaphore %u without texture barriers",
             frameNumber, g_openrrGlSemGLDone[0]);
     gl.SignalSemaphore(g_openrrGlSemGLDone[0], 0, NULL, 0, NULL, NULL);
+    if (frameNumber <= 4)
+        LOG("openrr: frame %u GL semaphore signal call returned; flushing signal", frameNumber);
     gl.Flush();
     if (!gl_ok("OpenRR semaphore-only GL signal")) {
         LOG("openrr: frame %u semaphore-only GL signal reported an error", frameNumber);
