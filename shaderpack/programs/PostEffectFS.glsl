@@ -5,6 +5,11 @@
 #define PIXELSIZE uPixelSize
 #include "Fallback_inc.glsl"
 
+// OpenRR is selected by AU_GI_DENOISER and does not require the NVIDIA DLSS toggle.
+// Still compile the shared PostEffectFS capture path so the hook can feed the Vulkan runtime.
+#define AU_DLSS_CAPTURE (AU_DLSS || AU_DLSS_FRAMEGEN || (AU_GI_DENOISER == 3))
+#define AU_DLSS_RR_CAPTURE (AU_DLSS || (AU_GI_DENOISER == 3))
+
 // Additional information for fallback code within FXAA_inc.glsl
 #define FXAA_PIXELSIZE uPixelSize
 // Hytale FXAA config : Parameters are chosen based on the informations provided in FXAA_inc.glsl
@@ -18,14 +23,14 @@
 uniform vec2 uPixelSize;
 #include "DepthOfField_inc.glsl"
 #include "AU_Tonemap.glsl"
-#if AU_DEBUG || AU_LENSFLARE || AU_DLSS || AU_DLSS_FRAMEGEN || AU_ADAPTIVE_EXPOSURE
+#if AU_DEBUG || AU_LENSFLARE || AU_DLSS_CAPTURE || AU_ADAPTIVE_EXPOSURE
 #include "SceneData_inc.glsl"
 #include "AU_Common.glsl"
 #endif
-#if AU_LENSFLARE || AU_DLSS || AU_DLSS_FRAMEGEN
+#if AU_LENSFLARE || AU_DLSS_CAPTURE
 uniform sampler2D uHookDepth;   // DeferredFS linear depth (0..1 of the far plane), shared by the hook
 #endif
-#if AU_DLSS || AU_DLSS_FRAMEGEN
+#if AU_DLSS_CAPTURE
 #include "Reconstruction_inc.glsl"
 #include "AU_Temporal.glsl"
 // DLSS inputs: textures shared with the hook's Vulkan device (hook/aud_dlss.c). The hook
@@ -41,8 +46,8 @@ uniform float uHookDlssSharpness;
 #if AU_DLSS
 layout(r8) uniform writeonly image2D auDlssResponsive;
 #endif
-#if AU_DLSS
-// DLSS Ray Reconstruction also reads what each pixel's surface is made of (guide images,
+#if AU_DLSS_RR_CAPTURE
+// Ray Reconstruction also reads what each pixel's surface is made of (guide images,
 // units 5-7), worked out here from Hytale's G-buffer (shared by the hook).
 #include "Deferred_inc.glsl"
 #include "AU_Surface.glsl"
@@ -531,7 +536,7 @@ void main()
     if(v.x == 0 || v.y == 0) outColor =  vec4(1);
 #endif
 
-#if AU_DLSS || AU_DLSS_FRAMEGEN
+#if AU_DLSS_CAPTURE
     if (uHookDlssActive == 1) {
         // The hook sizes the input images to this viewport. Not imageSize(): AMD's compiler
         // does not offer it to #version 410 shaders, and the RTX profiles switch DLSS on (#17).
@@ -554,19 +559,23 @@ void main()
 #endif
         float viewDepth = max(lin * FarClip, NearClip);
         float dlssDepth = lin >= 1.0 ? 1.0 : clamp(GetDepthHWFromLinearDepth(viewDepth, ProjectionMatrix), 0.0, 1.0);
-#if AU_DLSS
+#if AU_DLSS_RR_CAPTURE
         if (uHookDlssRR == 1) dlssDepth = viewDepth;
 #endif
         imageStore(auDlssDepth, pix, vec4(dlssDepth));
         imageStore(auDlssMotion, pix, vec4(motion, 0.0, 0.0));
-#if AU_DLSS
+#if AU_DLSS_RR_CAPTURE
         vec4 responseSurface = texture(uHookGBuffer0, fragTexCoords);
         vec4 responseNormal = texture(uHookGBuffer1, fragTexCoords);
+#endif
+#if AU_DLSS
         uint responseFlags = uint(round(responseSurface.a * 255.0));
         float response = lin >= 1.0 ? 0.0 : (responseFlags & 2u) != 0u ? 0.8
             : (responseFlags & 1u) == 0u ? 0.5 : responseNormal.a < 0.5 ? 0.25 : 0.0;
         if (lin * FarClip < AU_NEAR_IGNORE) response = 0.8;
         imageStore(auDlssResponsive, pix, vec4(response));
+#endif
+#if AU_DLSS_RR_CAPTURE
         if (uHookDlssRR == 1) {
             vec3 guideNormal = decodeNormal(responseNormal.rg);
             vec2 surfaceFootprint = AU_SurfaceFootprint(guideNormal, responseSurface.rgb);
