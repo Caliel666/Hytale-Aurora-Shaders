@@ -1241,26 +1241,27 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
     if (frameNumber <= 4) LOG("openrr: frame %u begin", frameNumber);
     VkCommandBuffer cb = begin_cmd();
     if (!cb) return 0;
-    GLuint textures[AUD_TEX_COUNT];
-    GLenum layouts[AUD_TEX_COUNT];
-    GLuint textureCount = 0;
-    for (int i = 0; i < AUD_TEX_COUNT; ++i) {
-        if (!g_img[i].glTex) continue;
-        textures[textureCount] = g_img[i].glTex;
-        layouts[textureCount++] = GL_LAYOUT_GENERAL_EXT;
-    }
-    if (frameNumber <= 4)
-        LOG("openrr: frame %u signaling shared GL semaphore %u for %u images",
-            frameNumber, g_openrrGlSemGLDone[0], textureCount);
-    gl.SignalSemaphore(g_openrrGlSemGLDone[0], 0, NULL, textureCount, textures, layouts);
-    gl.Flush();
-    if (!gl_ok("OpenRR GL signal")) {
-        LOG("openrr: frame %u GL-to-Vulkan semaphore signal reported an error", frameNumber);
+    // Diagnostic isolation: first complete GL work explicitly, then signal the imported
+    // semaphore without texture barriers. If this returns on AMD, the previous crash was
+    // in GL's external-texture barrier handling rather than the semaphore object itself.
+    if (frameNumber <= 4) LOG("openrr: frame %u finishing GL work before semaphore-only signal", frameNumber);
+    gl.Finish();
+    if (!gl_ok("OpenRR GL finish before signal")) {
         g_bridgeFailed = 1;
         return 0;
     }
     if (frameNumber <= 4)
-        LOG("openrr: frame %u GL signal returned and flushed", frameNumber);
+        LOG("openrr: frame %u signaling semaphore %u without texture barriers",
+            frameNumber, g_openrrGlSemGLDone[0]);
+    gl.SignalSemaphore(g_openrrGlSemGLDone[0], 0, NULL, 0, NULL, NULL);
+    gl.Flush();
+    if (!gl_ok("OpenRR semaphore-only GL signal")) {
+        LOG("openrr: frame %u semaphore-only GL signal reported an error", frameNumber);
+        g_bridgeFailed = 1;
+        return 0;
+    }
+    if (frameNumber <= 4)
+        LOG("openrr: frame %u semaphore-only GL signal returned and flushed", frameNumber);
     barrier_all(cb, 1);
 
     OnrRrFrame frame;
@@ -1305,16 +1306,16 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
     g_frameIdx = (g_frameIdx + 1) % AUD_FRAMES;
     if (frameNumber <= 4) LOG("openrr: frame %u Vulkan submit succeeded; waiting for GL", frameNumber);
     if (frameNumber <= 4)
-        LOG("openrr: frame %u waiting on shared Vulkan semaphore %u for %u images",
-            frameNumber, g_openrrGlSemVKDone[0], textureCount);
-    gl.WaitSemaphore(g_openrrGlSemVKDone[0], 0, NULL, textureCount, textures, layouts);
-    if (!gl_ok("OpenRR Vulkan-to-GL wait")) {
-        LOG("openrr: frame %u Vulkan-to-GL semaphore wait reported an error", frameNumber);
+        LOG("openrr: frame %u waiting on Vulkan semaphore %u without texture barriers",
+            frameNumber, g_openrrGlSemVKDone[0]);
+    gl.WaitSemaphore(g_openrrGlSemVKDone[0], 0, NULL, 0, NULL, NULL);
+    if (!gl_ok("OpenRR semaphore-only Vulkan-to-GL wait")) {
+        LOG("openrr: frame %u semaphore-only Vulkan-to-GL wait reported an error", frameNumber);
         g_bridgeFailed = 1;
         return 0;
     }
     if (frameNumber <= 4)
-        LOG("openrr: frame %u acquired all shared images in OpenGL", frameNumber);
+        LOG("openrr: frame %u semaphore-only Vulkan-to-GL wait returned", frameNumber);
     if (status != ONR_RR_OK) {
         char error[512] = {0};
         openrr_last_error(error, sizeof(error));
@@ -1463,12 +1464,50 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
         return 0;
     }
 
-    // No API has touched these shared images yet. Do not submit a Vulkan signal and then
-    // immediately call glWaitSemaphoreEXT during startup: on some AMD OpenGL drivers that
-    // initial wait crashes, despite the Vulkan queue being idle. The first real frame writes
-    // the guides in GL, signals each GL->VK semaphore with GENERAL as the destination layout,
-    // and lets RecordVk wait on those semaphores before using the images.
-    LOG("openrr: shared images ready; first GL frame will establish GENERAL layout and signal Vulkan");
+    // Establish GENERAL on the Vulkan images before GL's first use. This avoids a GL-side
+    // layout transition during the first semaphore operation; the subsequent diagnostic
+    // hand-off signals the semaphore without a texture-barrier list.
+    VkCommandBuffer initCmd = begin_cmd();
+    if (!initCmd) {
+        release_feature();
+        return 0;
+    }
+    VkImageMemoryBarrier initial[AUD_TEX_COUNT];
+    unsigned initialCount = 0;
+    for (int i = 0; i < AUD_TEX_COUNT; ++i) {
+        if (!g_img[i].image) continue;
+        VkImageMemoryBarrier *b = &initial[initialCount++];
+        memset(b, 0, sizeof(*b));
+        b->sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b->dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                           VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        b->oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b->newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b->srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b->dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b->image = g_img[i].image;
+        b->subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b->subresourceRange.levelCount = 1;
+        b->subresourceRange.layerCount = 1;
+    }
+    vkCmdPipelineBarrier_(initCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                          VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL,
+                          initialCount, initial);
+    if (!vk_ok(vkEndCommandBuffer_(initCmd), "end OpenRR initial image layouts")) {
+        release_feature();
+        return 0;
+    }
+    VkSubmitInfo initSubmit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    initSubmit.commandBufferCount = 1;
+    initSubmit.pCommandBuffers = &initCmd;
+    if (!vk_ok(vkQueueSubmit_(g_queue, 1, &initSubmit, g_fence[g_frameIdx]),
+               "submit OpenRR initial image layouts") ||
+        !vk_ok(vkQueueWaitIdle_(g_queue), "wait for OpenRR initial image layouts")) {
+        release_feature();
+        return 0;
+    }
+    g_frameIdx = (g_frameIdx + 1) % AUD_FRAMES;
+    LOG("openrr: shared images initialized to GENERAL on Vulkan; testing semaphore-only GL handoff");
     if (!openrr_create_context(renderW, renderH, outW, outH)) {
         release_feature();
         return 0;
