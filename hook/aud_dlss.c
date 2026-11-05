@@ -1447,65 +1447,12 @@ static int aud_configure_openrr(int renderW, int renderH, int outW, int outH)
         return 0;
     }
 
-    LOG("openrr: all shared guide images created; initializing Vulkan ownership");
-    LOG("openrr: begin initial image command buffer (frame slot %d)", g_frameIdx);
-    VkCommandBuffer cb = begin_cmd();
-    if (!cb) { LOG("openrr: failed to begin initial image command buffer"); release_feature(); return 0; }
-    LOG("openrr: initial image command buffer recording");
-    VkImageMemoryBarrier barriers[AUD_TEX_COUNT];
-    unsigned barrierCount = 0;
-    for (int i = 0; i < AUD_TEX_COUNT; ++i) {
-        if (!g_img[i].image) continue;
-        VkImageMemoryBarrier *barrier = &barriers[barrierCount++];
-        memset(barrier, 0, sizeof(*barrier));
-        barrier->sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier->dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        barrier->oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier->newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        barrier->srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier->dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier->image = g_img[i].image;
-        barrier->subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier->subresourceRange.levelCount = 1;
-        barrier->subresourceRange.layerCount = 1;
-    }
-    LOG("openrr: recording initial UNDEFINED -> GENERAL transition (%u images)", barrierCount);
-    vkCmdPipelineBarrier_(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                          0, 0, NULL, 0, NULL, barrierCount, barriers);
-    LOG("openrr: recording Vulkan -> OpenGL ownership release");
-    barrier_all(cb, 0); // hand freshly initialized images to the GL context
-    LOG("openrr: ending initial image command buffer");
-    if (!vk_ok(vkEndCommandBuffer_(cb), "end OpenRR image initialization")) {
-        release_feature(); return 0;
-    }
-    VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &cb;
-    submit.signalSemaphoreCount = AUD_TEX_COUNT;
-    submit.pSignalSemaphores = g_openrrSemVKDone;
-    LOG("openrr: submitting initial image ownership transition (queue=%p, %d per-image semaphores, fence=%p)",
-        (void *)g_queue, AUD_TEX_COUNT, (void *)g_fence[g_frameIdx]);
-    if (!vk_ok(vkQueueSubmit_(g_queue, 1, &submit, g_fence[g_frameIdx]), "submit OpenRR image initialization")) {
-        release_feature(); return 0;
-    }
-    LOG("openrr: initial Vulkan submit succeeded; waiting for queue idle");
-    if (!vk_ok(vkQueueWaitIdle_(g_queue), "wait for OpenRR image initialization")) {
-        release_feature(); return 0;
-    }
-    LOG("openrr: initial Vulkan queue idle; acquiring shared textures individually in OpenGL");
-    for (int i = 0; i < AUD_TEX_COUNT; ++i) {
-        if (!g_img[i].glTex) continue;
-        GLenum layout = GL_LAYOUT_GENERAL_EXT;
-        LOG("openrr: waiting for initial image %d semaphore", i);
-        gl.WaitSemaphore(g_openrrGlSemVKDone[i], 0, NULL, 1, &g_img[i].glTex, &layout);
-        LOG("openrr: initial image %d acquired by OpenGL", i);
-    }
-    if (!gl_ok("OpenRR initial shared image acquisition")) {
-        release_feature(); return 0;
-    }
-    g_frameIdx = (g_frameIdx + 1) % AUD_FRAMES;
-    LOG("openrr: shared images initialized; creating runtime context");
-    LOG("openrr: entering runtime Create after successful Vulkan/OpenGL image hand-off");
+    // No API has touched these shared images yet. Do not submit a Vulkan signal and then
+    // immediately call glWaitSemaphoreEXT during startup: on some AMD OpenGL drivers that
+    // initial wait crashes, despite the Vulkan queue being idle. The first real frame writes
+    // the guides in GL, signals each GL->VK semaphore with GENERAL as the destination layout,
+    // and lets RecordVk wait on those semaphores before using the images.
+    LOG("openrr: shared images ready; first GL frame will establish GENERAL layout and signal Vulkan");
     if (!openrr_create_context(renderW, renderH, outW, outH)) {
         release_feature();
         return 0;
