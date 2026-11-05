@@ -1069,14 +1069,15 @@ static int openrr_prepare_device(void)
         if (!vk_ok(vkCreateFence_(g_dev, &fenceInfo, NULL, &g_fence[i]), "create OpenRR host fence"))
             return 0;
     }
-    for (int i = 0; i < AUD_TEX_COUNT; ++i) {
-        if (!create_semaphore(&g_openrrSemGLDone[i], &g_openrrGlSemGLDone[i]) ||
-            !create_semaphore(&g_openrrSemVKDone[i], &g_openrrGlSemVKDone[i])) {
-            LOG("openrr: failed to create per-image semaphore pair for image %d", i);
-            return 0;
-        }
+    // One binary semaphore pair orders the complete shared-image set. This is the
+    // GL_EXT_semaphore pattern used by Khronos' OpenGL/Vulkan interop sample: one signal
+    // operation carries the texture barriers, rather than importing many semaphore objects.
+    if (!create_semaphore(&g_openrrSemGLDone[0], &g_openrrGlSemGLDone[0]) ||
+        !create_semaphore(&g_openrrSemVKDone[0], &g_openrrGlSemVKDone[0])) {
+        LOG("openrr: failed to create shared GL/Vulkan semaphore pair");
+        return 0;
     }
-    LOG("openrr: created %d per-image GL/Vulkan semaphore pairs", AUD_TEX_COUNT);
+    LOG("openrr: created shared GL/Vulkan semaphore pair for all bridge images");
     return 1;
 }
 
@@ -1240,13 +1241,26 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
     if (frameNumber <= 4) LOG("openrr: frame %u begin", frameNumber);
     VkCommandBuffer cb = begin_cmd();
     if (!cb) return 0;
+    GLuint textures[AUD_TEX_COUNT];
+    GLenum layouts[AUD_TEX_COUNT];
+    GLuint textureCount = 0;
     for (int i = 0; i < AUD_TEX_COUNT; ++i) {
         if (!g_img[i].glTex) continue;
-        GLenum layout = GL_LAYOUT_GENERAL_EXT;
-        if (frameNumber <= 4) LOG("openrr: frame %u signaling GL release for image %d", frameNumber, i);
-        gl.SignalSemaphore(g_openrrGlSemGLDone[i], 0, NULL, 1, &g_img[i].glTex, &layout);
+        textures[textureCount] = g_img[i].glTex;
+        layouts[textureCount++] = GL_LAYOUT_GENERAL_EXT;
     }
+    if (frameNumber <= 4)
+        LOG("openrr: frame %u signaling shared GL semaphore %u for %u images",
+            frameNumber, g_openrrGlSemGLDone[0], textureCount);
+    gl.SignalSemaphore(g_openrrGlSemGLDone[0], 0, NULL, textureCount, textures, layouts);
     gl.Flush();
+    if (!gl_ok("OpenRR GL signal")) {
+        LOG("openrr: frame %u GL-to-Vulkan semaphore signal reported an error", frameNumber);
+        g_bridgeFailed = 1;
+        return 0;
+    }
+    if (frameNumber <= 4)
+        LOG("openrr: frame %u GL signal returned and flushed", frameNumber);
     barrier_all(cb, 1);
 
     OnrRrFrame frame;
@@ -1276,29 +1290,31 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
     if (frameNumber <= 4) LOG("openrr: frame %u RecordVk returned status=%d", frameNumber, status);
     barrier_all(cb, 0);
     if (!vk_ok(vkEndCommandBuffer_(cb), "end OpenRR frame commands")) return 0;
-    VkPipelineStageFlags waitStages[AUD_TEX_COUNT];
-    for (int i = 0; i < AUD_TEX_COUNT; ++i) waitStages[i] = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
     VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.waitSemaphoreCount = AUD_TEX_COUNT;
-    submit.pWaitSemaphores = g_openrrSemGLDone;
-    submit.pWaitDstStageMask = waitStages;
+    submit.waitSemaphoreCount = 1;
+    submit.pWaitSemaphores = &g_openrrSemGLDone[0];
+    submit.pWaitDstStageMask = &waitStage;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cb;
-    submit.signalSemaphoreCount = AUD_TEX_COUNT;
-    submit.pSignalSemaphores = g_openrrSemVKDone;
+    submit.signalSemaphoreCount = 1;
+    submit.pSignalSemaphores = &g_openrrSemVKDone[0];
     if (frameNumber <= 4) LOG("openrr: frame %u submitting Vulkan command buffer", frameNumber);
     if (!vk_ok(vkQueueSubmit_(g_queue, 1, &submit, g_fence[g_frameIdx]), "submit OpenRR frame"))
         return 0;
     g_frameIdx = (g_frameIdx + 1) % AUD_FRAMES;
     if (frameNumber <= 4) LOG("openrr: frame %u Vulkan submit succeeded; waiting for GL", frameNumber);
-    for (int i = 0; i < AUD_TEX_COUNT; ++i) {
-        if (!g_img[i].glTex) continue;
-        GLenum layout = GL_LAYOUT_GENERAL_EXT;
-        if (frameNumber <= 4) LOG("openrr: frame %u waiting for Vulkan image %d", frameNumber, i);
-        gl.WaitSemaphore(g_openrrGlSemVKDone[i], 0, NULL, 1, &g_img[i].glTex, &layout);
-        if (frameNumber <= 4) LOG("openrr: frame %u acquired image %d in OpenGL", frameNumber, i);
+    if (frameNumber <= 4)
+        LOG("openrr: frame %u waiting on shared Vulkan semaphore %u for %u images",
+            frameNumber, g_openrrGlSemVKDone[0], textureCount);
+    gl.WaitSemaphore(g_openrrGlSemVKDone[0], 0, NULL, textureCount, textures, layouts);
+    if (!gl_ok("OpenRR Vulkan-to-GL wait")) {
+        LOG("openrr: frame %u Vulkan-to-GL semaphore wait reported an error", frameNumber);
+        g_bridgeFailed = 1;
+        return 0;
     }
-    if (!gl_ok("OpenRR GL/Vulkan hand-off")) return 0;
+    if (frameNumber <= 4)
+        LOG("openrr: frame %u acquired all shared images in OpenGL", frameNumber);
     if (status != ONR_RR_OK) {
         char error[512] = {0};
         openrr_last_error(error, sizeof(error));
