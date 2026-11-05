@@ -1299,15 +1299,10 @@ static int aud_openrr_evaluate(float jitterX, float jitterY, float mvScaleX, flo
     if (frameNumber <= 4) LOG("openrr: frame %u begin", frameNumber);
     VkCommandBuffer cb = begin_cmd();
     if (!cb) return 0;
-    // GL commands are ordered within this context. Flush them before queuing the external
-    // semaphore signal; glFinish is unnecessary here and can stall/crash in AMD's driver
-    // while external Vulkan memory is bound to the context.
-    if (frameNumber <= 4) LOG("openrr: frame %u flushing GL work before shared-image signal", frameNumber);
-    gl.Flush();
-    if (!gl_ok("OpenRR GL flush before signal")) {
-        g_bridgeFailed = 1;
-        return 0;
-    }
+    // Match the Khronos GL/Vulkan interop ordering: enqueue the GL semaphore signal
+    // after prior GL commands, then flush the signal itself below. An extra pre-signal
+    // flush is unnecessary and can force AMD's GL driver to drain the queue too early.
+    if (frameNumber <= 4) LOG("openrr: frame %u queuing shared-image signal without pre-flush", frameNumber);
     // GL_EXT_semaphore carries the image barriers with the semaphore operation. Keep every
     // imported texture in GENERAL on both APIs, matching the existing DLSS bridge and
     // Khronos' OpenGL/Vulkan interop sample.
