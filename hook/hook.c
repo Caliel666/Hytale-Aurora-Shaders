@@ -2701,6 +2701,11 @@ static void check_extras(GLuint prog, ProgRec *p)
         if (loc >= 0) { r_glUniform1i(loc, dlssUni[i].unit); p->usesDlss = 1; p->hasExtras = 1; }
     }
     if (!p->usesDlss && g_dlssProg == prog) g_dlssProg = 0;
+#if defined(_WIN32) && AU_HAS_OPENRR
+    if (!strcmp(p->pname, "PostEffectFS") && g_setOpenRR)
+        logf_("openrr: PostEffectFS capture uniforms %s (program %u)",
+              p->usesDlss ? "detected" : "MISSING", prog);
+#endif
 }
 
 // Minecraft-style "wetness": follows the rain signal with Optifine's default half-lives
