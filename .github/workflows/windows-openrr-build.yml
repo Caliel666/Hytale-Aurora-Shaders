@@ -24,32 +24,141 @@ jobs:
 
       - name: Build Windows hook and OpenRR payload
         shell: pwsh
-        run: .\build.ps1
+        run: .\\build.ps1
 
-      - name: Verify packaged OpenRR files
+      - name: Stage complete Windows installer package
         shell: pwsh
         run: |
-          $required = @(
-            "build\opengl32.dll",
-            "build\OpenNrRrRuntime.dll",
-            "build\opennr-rr\shaders",
-            "build\opennr-rr\nvngx_dlssd.dll"
-          )
-          foreach ($path in $required) {
-            if (-not (Test-Path -LiteralPath $path)) {
-              throw "Required OpenRR build output is missing: $path"
-            }
+          $ErrorActionPreference = "Stop"
+          $repoRoot = $env:GITHUB_WORKSPACE
+          $packageRoot = Join-Path $repoRoot "dist\\Aurora-AMD-OpenRR-Windows"
+          if (Test-Path -LiteralPath $packageRoot) {
+            Remove-Item -LiteralPath $packageRoot -Recurse -Force
           }
-          if ((Get-Item "build\opennr-rr\nvngx_dlssd.dll").Length -lt 40000000) {
-            throw "The pinned DLSSD weight-source file is unexpectedly small."
+          New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
+
+          function Copy-TrackedFolder([string]$RelativePath) {
+            $files = @(& git -C $repoRoot ls-files -- $RelativePath)
+            if ($LASTEXITCODE -ne 0 -or $files.Count -eq 0) {
+              throw "No tracked files found for package folder: $RelativePath"
+            }
+            foreach ($relativeFile in $files) {
+              $source = Join-Path $repoRoot $relativeFile
+              $destination = Join-Path $packageRoot $relativeFile
+              New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+              Copy-Item -LiteralPath $source -Destination $destination -Force
+            }
+            Write-Host "Packaged $($files.Count) tracked files from $RelativePath"
           }
 
-      - name: Upload Windows build
+          # Keep the installer's expected root layout. install.ps1 links/copies
+          # <package-root>\\shaderpack and deploys the OpenRR payload from <package-root>\\build.
+          $rootFiles = @(
+            "README.md",
+            "Install.bat",
+            "Update.bat",
+            "Uninstall.bat",
+            "install.ps1",
+            "build.ps1",
+            "Build From Source.bat"
+          )
+          foreach ($relativeFile in $rootFiles) {
+            $source = Join-Path $repoRoot $relativeFile
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+              throw "Required Windows installer file is missing: $relativeFile"
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $packageRoot $relativeFile) -Force
+          }
+
+          $toolFiles = @(
+            "tools\\prepare_shaders.ps1",
+            "tools\\build_emitters.ps1",
+            "tools\\build_sss.ps1",
+            "tools\\material_rules.txt",
+            "tools\\sss_masks.cs",
+            "tools\\gen_stubs.py"
+          )
+          foreach ($relativeFile in $toolFiles) {
+            $source = Join-Path $repoRoot $relativeFile
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+              throw "Required installer helper is missing: $relativeFile"
+            }
+            $destination = Join-Path $packageRoot $relativeFile
+            New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+            Copy-Item -LiteralPath $source -Destination $destination -Force
+          }
+
+          # These are generated from the user's own HytaleClient.exe during installation.
+          # Ship the generator inputs, not game-extracted shader code.
+          Copy-TrackedFolder "shaderpack"
+          Copy-TrackedFolder "hook"
+          Copy-TrackedFolder "tools/mapchunk"
+
+          $buildRoot = Join-Path $packageRoot "build"
+          New-Item -ItemType Directory -Path $buildRoot -Force | Out-Null
+          Copy-Item -LiteralPath (Join-Path $repoRoot "build\\opengl32.dll") -Destination (Join-Path $buildRoot "opengl32.dll") -Force
+          Copy-Item -LiteralPath (Join-Path $repoRoot "build\\OpenNrRrRuntime.dll") -Destination (Join-Path $buildRoot "OpenNrRrRuntime.dll") -Force
+          Copy-Item -LiteralPath (Join-Path $repoRoot "build\\opennr-rr") -Destination (Join-Path $buildRoot "opennr-rr") -Recurse -Force
+
+          # Fail the job if the complete tracked Aurora shaderpack was not copied byte-for-byte.
+          $packFiles = @(& git -C $repoRoot ls-files -- shaderpack)
+          if ($LASTEXITCODE -ne 0 -or $packFiles.Count -eq 0) {
+            throw "Could not enumerate tracked shaderpack files."
+          }
+          $stagedPackFiles = @(Get-ChildItem -LiteralPath (Join-Path $packageRoot "shaderpack") -File -Recurse)
+          if ($stagedPackFiles.Count -ne $packFiles.Count) {
+            throw "Shaderpack file count mismatch: source=$($packFiles.Count), staged=$($stagedPackFiles.Count)"
+          }
+          foreach ($relativeFile in $packFiles) {
+            $source = Join-Path $repoRoot $relativeFile
+            $staged = Join-Path $packageRoot $relativeFile
+            if (-not (Test-Path -LiteralPath $staged -PathType Leaf)) {
+              throw "Shaderpack file missing from installer package: $relativeFile"
+            }
+            if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne
+                (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash) {
+              throw "Shaderpack file changed while staging: $relativeFile"
+            }
+          }
+
+          $postEffect = Get-Content -LiteralPath (Join-Path $packageRoot "shaderpack\\programs\\PostEffectFS.glsl") -Raw
+          if ($postEffect -notmatch "AU_DLSS_CAPTURE" -or $postEffect -notmatch "AU_GI_DENOISER") {
+            throw "Packaged PostEffectFS.glsl is missing the OpenRR capture compile path."
+          }
+
+          $required = @(
+            "Install.bat",
+            "install.ps1",
+            "build\\opengl32.dll",
+            "build\\OpenNrRrRuntime.dll",
+            "build\\opennr-rr\\shaders",
+            "build\\opennr-rr\\nvngx_dlssd.dll",
+            "shaderpack\\include\\AU_Settings.glsl",
+            "shaderpack\\programs\\PostEffectFS.glsl",
+            "shaderpack\\programs\\DeferredFS.glsl",
+            "tools\\prepare_shaders.ps1",
+            "tools\\mapchunk\\includes.glsl",
+            "hook\\hook.c"
+          )
+          foreach ($relativePath in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path $packageRoot $relativePath))) {
+              throw "Windows installer package is incomplete: $relativePath"
+            }
+          }
+          if ((Get-Item -LiteralPath (Join-Path $packageRoot "build\\opennr-rr\\nvngx_dlssd.dll")).Length -lt 40000000) {
+            throw "The packaged DLSSD weight-source file is unexpectedly small."
+          }
+          $spvFiles = @(Get-ChildItem -LiteralPath (Join-Path $packageRoot "build\\opennr-rr\\shaders") -File -Recurse -Filter "*.spv")
+          if ($spvFiles.Count -eq 0) {
+            throw "The packaged OpenRR SPIR-V shader directory is empty."
+          }
+
+          Write-Host "PASS: staged self-contained Windows installer with $($packFiles.Count) Aurora shaderpack files and $($spvFiles.Count) OpenRR SPIR-V shaders."
+          Write-Host "Package root: $packageRoot"
+
+      - name: Upload Windows installer package
         uses: actions/upload-artifact@v4
         with:
           name: Aurora-AMD-OpenRR-Windows
           if-no-files-found: error
-          path: |
-            build/opengl32.dll
-            build/OpenNrRrRuntime.dll
-            build/opennr-rr/
+          path: dist/Aurora-AMD-OpenRR-Windows/
